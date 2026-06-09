@@ -1,0 +1,11 @@
+{
+  "name": "disasm-codemode",
+  "version": "0.1.0",
+  "description": "Drive a disassembler/decompiler headlessly via its code-mode MCP for reverse engineering, binary patch-diffing, and memory-safety bug-class scanning. First implementation: Binary Ninja.",
+  "author": { "name": "Phil Brass" },
+  "license": "MIT",
+  "keywords": [
+    "reverse-engineering", "binary-ninja", "vulnerability-research",
+    "patch-diff", "bug-hunting", "binary-analysis", "mcp", "capstone"
+  ]
+}

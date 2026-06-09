@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Binary Ninja databases & analysis artifacts (never commit target binaries/bndbs)
+*.bndb
+*.bndb.*
+
+# OS / editor cruft
+.DS_Store
+*.swp
+.idea/
+.vscode/

@@ -1,0 +1,16 @@
+{
+  "name": "disasm-codemode",
+  "owner": { "name": "Phil Brass", "url": "https://github.com/pbrass" },
+  "metadata": {
+    "description": "Marketplace for the disasm-codemode plugin (drive a decompiler's code-mode MCP for RE / patch-diff / bug hunting).",
+    "version": "0.2.0"
+  },
+  "plugins": [
+    {
+      "name": "disasm-codemode",
+      "source": "./",
+      "description": "Drive a disassembler/decompiler headlessly via its code-mode MCP for reverse engineering, binary patch-diffing, and memory-safety bug-class scanning. First implementation: Binary Ninja.",
+      "keywords": ["reverse-engineering", "binary-ninja", "vulnerability-research", "patch-diff"]
+    }
+  ]
+}

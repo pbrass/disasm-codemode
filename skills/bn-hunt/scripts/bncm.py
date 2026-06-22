@@ -1,0 +1,1 @@
+../../bn-inspect/scripts/bncm.py

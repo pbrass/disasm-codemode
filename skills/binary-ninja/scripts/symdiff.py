@@ -13,6 +13,12 @@ from capstone import x86
 md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
 md.detail = True
 
+# Symbol names come from the (untrusted) ELFs' symbol tables — neutralize embedded terminal-escape
+# bytes before printing (see binary-ninja/reference/mcp-codemode-guide.md §F).
+_CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+def _scrub(s):
+    return _CTRL.sub(lambda m: "\\x%02x" % ord(m.group(0)), s) if s else s
+
 def norm_insn(insn):
     m = insn.mnemonic
     if m == 'call' or m.startswith('j') or m.startswith('loop'):
@@ -96,8 +102,13 @@ def main():
     ap.add_argument('--demangle', action='store_true')
     ap.add_argument('--list', action='store_true', help='print every changed function')
     a = ap.parse_args()
-    print(f"[*] loading {a.old} ..."); fo = load_funcs(a.old)
-    print(f"[*] loading {a.new} ..."); fn = load_funcs(a.new)
+    try:
+        print(f"[*] loading {a.old} ..."); fo = load_funcs(a.old)
+        print(f"[*] loading {a.new} ..."); fn = load_funcs(a.new)
+    except FileNotFoundError as e:
+        print("[symdiff] cannot open file: %s" % e); sys.exit(1)
+    except Exception as e:
+        print("[symdiff] cannot load ELF (%s): %s" % (e.__class__.__name__, e)); sys.exit(1)
     co, cn = set(fo), set(fn)
     common = co & cn
     changed = sorted(n for n in common if fo[n][0] != fn[n][0])
@@ -110,15 +121,15 @@ def main():
         hits = [n for n in changed if rx.search(dm.get(n, n))]
         print(f"\n=== CHANGED matching /{a.filter}/  ({len(hits)}) ===")
         for n in hits:
-            print(f"  [chg] {dm.get(n,n)}")
+            print(f"  [chg] {_scrub(dm.get(n,n))}")
         ah = [n for n in added if rx.search(dm.get(n,n))]
         if ah:
             print(f"--- ADDED matching ---")
-            for n in ah: print(f"  [add] {dm.get(n,n)}")
+            for n in ah: print(f"  [add] {_scrub(dm.get(n,n))}")
     if a.list:
         print(f"\n=== ALL CHANGED ({len(changed)}) ===")
         for n in changed:
-            print(f"  {dm.get(n,n)}")
+            print(f"  {_scrub(dm.get(n,n))}")
 
 if __name__ == '__main__':
     main()

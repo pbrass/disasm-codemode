@@ -26,33 +26,57 @@ A skill (`skills/binary-ninja/`) that gives the agent:
 - **Reference docs** — the code-mode sandbox gotchas (the ones that actually waste your time) and the
   patch-diff methodology.
 
+Two companion skills build on it:
+- **`skills/bulk-decompile/`** — dump a whole binary (or a reachable closure) to per-function HLIL/asm
+  files on disk, one `/execute` call per function (works around the ~100 KB output cap + big-binary
+  crash), for offline reading/grepping/diffing or subagent fan-out.
+- **`skills/bn-inspect/`** — five **injection-safe** parameterized templates for the most common
+  targeted lookups (decompile one function, find functions, list xrefs, find a string's referencing
+  functions, scan a section). Inputs are validated (suspicious characters rejected) and embedded only
+  as escaped literals, so they are safe to point at attacker-influenced names/strings.
+- **`skills/bn-hunt/`** — the next-tier **bug-class hunting** templates (same injection-safe client):
+  a sink's call sites + argument expressions (`bn-callsites`), stack-frame/recursion/signature analysis
+  with a `--top N` DoS-candidate ranking (`bn-frame`), and an instruction-window disassembler
+  (`bn-disasm-range`).
+
+Plus:
+- **`bin/`** — command wrappers auto-added to PATH when the plugin is installed: `bn-decompile`,
+  `bn-find`, `bn-xrefs`, `bn-strxref`, `bn-scansec`, `bn-callsites`, `bn-frame`, `bn-disasm-range`,
+  `bn-scan`, `bn-cap-scan`, `bn-symdiff`, `bn-bulk-decompile`, `bn-open`, `bn-status`, `bn-exec`.
+- **`agents/bn-triage`** — a read-only subagent for parallel, adversarial triage of decompiled
+  functions / scanner candidates.
+- **`tests/`** — a 103-test suite (injection-guard unit tests + per-skill integration against compiled
+  C fixtures + graceful-failure checks): `python3 tests/run_tests.py`.
+
 ## Install
 
 ```bash
-# from a local clone (add as a plugin marketplace, then install):
-/plugin marketplace add /path/to/disasm-codemode
-/plugin install disasm-codemode
-# or point Claude Code at the published repo once it's on GitHub.
+# the repo doubles as a single-plugin marketplace (.claude-plugin/marketplace.json):
+/plugin marketplace add pbrass/disasm-codemode        # or a local clone path
+/plugin install disasm-codemode@disasm-codemode
 ```
 
 Then in Binary Ninja, start the code-mode MCP server (e.g. the
 [`akrutsinger/binja-codemode-mcp`](https://github.com/akrutsinger/binja-codemode-mcp) plugin:
-`Plugins > MCP Code Mode > Start Server`, binds `127.0.0.1:42069`). For the standalone capstone tools:
-`pip install capstone pyelftools`.
+`Plugins > MCP Code Mode > Start Server`, binds `127.0.0.1:42069`) and verify with `bn-status`.
+For the standalone capstone tools: `pip install capstone pyelftools`.
 
-The agent loads the skill automatically when a task involves reverse-engineering, patch-diffing, or
-bug-hunting a binary. You can also use the scripts directly:
+The agent loads a skill automatically when a task involves reverse-engineering, patch-diffing, or
+bug-hunting a binary; the `bin/` commands are then on PATH. From a local clone (not installed), run
+them as `bin/<cmd>`:
 
 ```bash
-python3 skills/binary-ninja/scripts/binja.py 'print(binja.get_binary_status())'
-python3 skills/binary-ninja/scripts/cap_scan.py /path/to/module.o
-python3 skills/binary-ninja/scripts/symdiff.py old.elf new.elf --demangle --list
+bin/bn-status                                    # is the BN code-mode MCP up?
+bin/bn-exec 'print(binja.get_binary_status())'
+bin/bn-cap-scan /path/to/module.o
+bin/bn-symdiff old.elf new.elf --demangle --list
 ```
 
 ## Status
 
-v0.1 — extracted from real vulnerability-research work. The BN skill is complete and used in anger; IDA /
-Ghidra siblings are TODO. Issues and PRs welcome.
+v0.2 — extracted from real vulnerability-research work and used in anger. Binary Ninja support is complete
+(four skills + a triage subagent + a 140-test suite, with hostile-binary output hardening); IDA / Ghidra
+siblings are TODO. See [CHANGELOG.md](CHANGELOG.md). Issues and PRs welcome.
 
 ## License
 

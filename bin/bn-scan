@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Run a BN HLIL bug-class scanner against a binary or .bndb.
+# Usage: bn-scan <intof|heapmismatch|dangcopy|doublefetch> /path/to/target
+root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}"
+cls="$1"; target="$2"
+tpl="$root/skills/binary-ninja/scripts/bn_scan_${cls}.py"
+[ -f "$tpl" ] || { echo "bn-scan: unknown class '$cls' (intof|heapmismatch|dangcopy|doublefetch)" >&2; exit 2; }
+[ -n "$target" ] || { echo "usage: bn-scan <class> <binary-or-bndb>" >&2; exit 2; }
+# the target path is interpolated into the scanner's load("...") via sed; refuse anything that
+# could break out of that string literal / the sed expression.
+if printf '%s' "$target" | LC_ALL=C grep -q '[^A-Za-z0-9_./+=-]'; then
+  echo "bn-scan: target path has characters outside [A-Za-z0-9_./+=-]; refusing" >&2; exit 2
+fi
+sed -e "s#BNDBPATH#${target}#" -e 's#update_analysis=False#update_analysis=True#' "$tpl" \
+  | python3 "$root/skills/binary-ninja/scripts/binja.py"

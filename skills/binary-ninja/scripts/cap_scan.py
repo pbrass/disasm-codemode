@@ -9,13 +9,19 @@
 # Fast + parallelizable: scans EVERY reachable module without a bndb. Verify hits in BN/HLIL.
 #
 # Usage: python3 cap_scan.py <module.elf> [--all]   (default: only MUL/SHIFT/SIGNEXT + MEMLOAD-into-copy)
-import sys, argparse
+import sys, re, argparse
 from elftools.elf.elffile import ELFFile
 import capstone
 from capstone import x86
 
 md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
 md.detail = True
+
+# Symbol/callee names come from the (untrusted) object's .symtab/.rela.text — neutralize any
+# embedded terminal-escape bytes before printing (see binary-ninja/reference/mcp-codemode-guide.md §F).
+_CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+def _scrub(s):
+    return _CTRL.sub(lambda m: "\\x%02x" % ord(m.group(0)), s) if s else s
 
 # canonical 64-bit register name for any sub-register
 _SUB = {}
@@ -114,6 +120,10 @@ def scan(path, show_all=False):
         data = text.data()
         rmap = reloc_map(elf, text_idx)
         symtab = elf.get_section_by_name('.symtab')
+        if symtab is None:
+            print("[cap_scan] %s has no .symtab (stripped?) -- cap_scan needs a non-stripped "
+                  "ET_REL object whose .symtab names the functions" % path.split('/')[-1])
+            return []
         funcs = []
         for s in symtab.iter_symbols():
             if s['st_info']['type']=='STT_FUNC' and s['st_size']>0 and s['st_shndx']==text_idx:
@@ -168,10 +178,15 @@ if __name__ == '__main__':
     ap = argparse.ArgumentParser()
     ap.add_argument('path'); ap.add_argument('--all', action='store_true')
     a = ap.parse_args()
-    hits = scan(a.path, a.all)
+    try:
+        hits = scan(a.path, a.all)
+    except FileNotFoundError:
+        print("[cap_scan] cannot open %s: file not found" % a.path); sys.exit(1)
+    except Exception as e:
+        print("[cap_scan] %s is not a usable ELF object (%s)" % (a.path, e.__class__.__name__)); sys.exit(1)
     # rank: STACKCOPY (stack-overflow) first, then SIGNEXT/MUL/SHIFT, then MEMLOAD-into-copy
     order = {'STACKCOPY':0,'SIGNEXT':1,'MUL':2,'SHIFT':2,'LEA_SCALE':3,'MEMLOAD':4}
     hits.sort(key=lambda h: order.get(h[4], 9))
-    print("%s: %d candidates" % (a.path.split('/')[-1], len(hits)))
+    print(_scrub("%s: %d candidates" % (a.path.split('/')[-1], len(hits))))
     for name, _o, ad, callee, cls, prov, dst in hits[:200]:
-        print("  %-40s 0x%-6x %-18s %-9s %-46s %s" % (name[:40], ad, callee[:18], cls, prov, dst))
+        print(_scrub("  %-40s 0x%-6x %-18s %-9s %-46s %s" % (name[:40], ad, callee[:18], cls, prov, dst)))

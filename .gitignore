@@ -15,8 +15,7 @@ tests/fixtures/target_v2.o
 tests/fixtures/target.stripped
 tests/fixtures/notelf.txt
 tests/fixtures/empty.bin
-tests/fixtures/target_evil
-tests/fixtures/target_evil.o
+tests/fixtures/target_evil*
 
 # OS / editor cruft
 .DS_Store

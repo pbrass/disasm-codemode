@@ -1,13 +1,13 @@
 {
   "name": "disasm-codemode",
-  "version": "0.2.0",
-  "description": "Drive a disassembler/decompiler headlessly via its code-mode MCP for reverse engineering, binary patch-diffing, and memory-safety bug-class scanning. First implementation: Binary Ninja.",
+  "version": "0.3.0",
+  "description": "Drive a disassembler/decompiler headlessly via its code-mode MCP for reverse engineering, binary patch-diffing, and memory-safety bug-class scanning. Engines: Binary Ninja and Ghidra.",
   "author": { "name": "Phil Brass" },
   "license": "MIT",
   "homepage": "https://github.com/pbrass/disasm-codemode",
   "repository": "https://github.com/pbrass/disasm-codemode",
   "keywords": [
-    "reverse-engineering", "binary-ninja", "vulnerability-research",
+    "reverse-engineering", "binary-ninja", "ghidra", "vulnerability-research",
     "patch-diff", "bug-hunting", "binary-analysis", "mcp", "capstone"
   ]
 }

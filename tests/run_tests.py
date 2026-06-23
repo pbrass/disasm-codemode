@@ -15,9 +15,12 @@ FX = os.path.join(HERE, "fixtures")
 INSPECT = os.path.join(ROOT, "skills", "bn-inspect", "scripts")
 HUNT = os.path.join(ROOT, "skills", "bn-hunt", "scripts")
 BNJA = os.path.join(ROOT, "skills", "binary-ninja", "scripts")
+GHIDRA = os.path.join(ROOT, "skills", "ghidra", "scripts")
 PY = sys.executable
 MCP_URL = os.environ.get("BINJA_MCP_URL", "http://127.0.0.1:42069").rstrip("/")
 MCP_KEY = os.environ.get("BINJA_MCP_KEY", "binja-codemode-local")
+GH_HOST = os.environ.get("GHIDRA_MCP_HOST", "127.0.0.1")
+GH_PORT = int(os.environ.get("GHIDRA_MCP_PORT", "8765"))
 
 # fixtures
 T = os.path.join(FX, "target")
@@ -399,7 +402,9 @@ def test_packaging():
     # bin/ wrappers present, executable, shebang'd
     expected = ["bn-decompile", "bn-find", "bn-xrefs", "bn-strxref", "bn-scansec", "bn-callsites",
                 "bn-frame", "bn-disasm-range", "bn-scan", "bn-cap-scan", "bn-symdiff",
-                "bn-bulk-decompile", "bn-open", "bn-status", "bn-exec"]
+                "bn-bulk-decompile", "bn-open", "bn-status", "bn-exec",
+                "gh-decompile", "gh-find", "gh-xrefs", "gh-strxref", "gh-scansec", "gh-callsites",
+                "gh-frame", "gh-disasm-range", "gh-scan", "gh-exec", "gh-status"]
     have = set(os.listdir(BIN)) if os.path.isdir(BIN) else set()
     uassert("bin/ has all wrappers", all(w in have for w in expected), "missing: %s" % [w for w in expected if w not in have])
     nonexec = [w for w in expected if w in have and not os.access(os.path.join(BIN, w), os.X_OK)]
@@ -420,6 +425,16 @@ def test_packaging():
     uassert("bn-inspect SKILL uses bn-* commands", all(c in si for c in ("bn-decompile", "bn-find", "bn-xrefs", "bn-strxref", "bn-scansec")))
     uassert("bn-hunt SKILL uses bn-* commands", all(c in shh for c in ("bn-callsites", "bn-frame", "bn-disasm-range")))
     uassert("no stale bnopen.sh reference in bn-inspect SKILL", "bnopen.sh" not in si)
+    # ghidra skill: SKILL.md, scripts, reference guide
+    gs = open(os.path.join(ROOT, "skills", "ghidra", "SKILL.md")).read()
+    uassert("ghidra SKILL uses gh-* commands", all(c in gs for c in (
+        "gh-decompile", "gh-find", "gh-xrefs", "gh-strxref", "gh-scansec", "gh-callsites",
+        "gh-frame", "gh-disasm-range", "gh-scan", "gh-exec", "gh-status")))
+    uassert("ghidra skill has ghcm.py + all templates", all(os.path.exists(os.path.join(GHIDRA, s)) for s in (
+        "ghcm.py", "decompile.py", "findfunc.py", "xrefs.py", "strxref.py", "scansec.py",
+        "callsites.py", "frame.py", "disasm-range.py", "scan.py", "ghexec.py", "ghstatus.py")))
+    uassert("ghidra reference guide present",
+            os.path.exists(os.path.join(ROOT, "skills", "ghidra", "reference", "ghidra-codemode-guide.md")))
     # bn-scan argument validation (no MCP needed — wrapper checks args first)
     expect("bn-scan unknown-class reject", [os.path.join(BIN, "bn-scan"), "nope_class", TO], rc=2, has=[r"unknown class"])
     expect("bn-scan missing-target usage", [os.path.join(BIN, "bn-scan"), "intof"], rc=2, has=[r"usage"])
@@ -463,15 +478,19 @@ def _make_evil(src, dst, sym, evil):
 
 def test_security():
     print("\n## security: tainted-output handling (hostile-binary threat model)")
-    sys.path.insert(0, INSPECT)
-    import importlib, bncm
-    importlib.reload(bncm)
+    sys.path.insert(0, INSPECT); sys.path.insert(0, GHIDRA)
+    import importlib, bncm, ghcm
+    importlib.reload(bncm); importlib.reload(ghcm)
     # unit: scrub() neutralizes terminal-escape bytes, keeps \n/\t/printable, renders visibly
     nasty = "n\x1b[31m\x1b]0;t\x07\x9b1m\rX\x00\x7f"
     sc = bncm.scrub(nasty)
     uassert("scrub removes ESC/CSI/OSC/BEL/CR/NUL/DEL/C1", not any(c in sc for c in "\x1b\x9b\x07\r\x00\x7f"), repr(sc))
     uassert("scrub keeps newline/tab/printable", bncm.scrub("a\tb\nc d") == "a\tb\nc d")
     uassert("scrub renders bytes visibly", "\\x1b" in sc)
+    # ghcm.scrub must behave identically (the two skills share the tainted-output design)
+    gsc = ghcm.scrub(nasty)
+    uassert("ghcm.scrub removes ESC/CSI/OSC/BEL/CR/NUL/DEL/C1", not any(c in gsc for c in "\x1b\x9b\x07\r\x00\x7f"), repr(gsc))
+    uassert("ghcm.scrub keeps newline/tab + renders visibly", ghcm.scrub("a\tb\nc d") == "a\tb\nc d" and "\\x1b" in gsc)
     # unit: dump_decompile.safe() blocks path traversal + strips control bytes from names
     sys.path.insert(0, os.path.join(ROOT, "skills", "bulk-decompile", "scripts"))
     import dump_decompile as dd
@@ -527,6 +546,211 @@ def test_security():
             skip("findfunc evil-name scrub", "could not patch .strtab")
     else:
         skip("findfunc evil-name scrub", "MCP down")
+    # ghidra: code-mode output must be scrubbed before printing. A patched symbol name is unreliable
+    # on Ghidra (it prefers the clean DWARF name), so inject exact attacker-chosen control bytes
+    # through the SAME captured-stdout path that gh-find/gh-decompile output flows through.
+    if gh_up():
+        expect("gh code-mode stdout is scrubbed (tainted-output path)",
+               [PY, os.path.join(GHIDRA, "ghexec.py"), "--file", T, "--code",
+                r'print("X\x1b[31m\x9b1m\x07\x00Y")'],
+               rc=0, has=[r"\\x1b", r"\\x9b"], nothas=["\x1b", "\x9b", "\x07"])
+        # the eval RESULT value (eval-mode expression return) must be scrubbed too, not just stdout
+        expect("gh-exec scrubs the eval result value",
+               [PY, os.path.join(GHIDRA, "ghexec.py"), "--file", T, "--code", r'"R\x1b[7mE\x07"'],
+               rc=0, has=[r"=>.*\\x1b"], nothas=["\x1b", "\x07"])
+    else:
+        skip("gh tainted-output scrub", "ghidra server down")
+
+
+# =============================================================== GHIDRA helpers
+def gh_up():
+    """True iff the ghidra-headless-mcp TCP server is reachable + healthy (else integration skips).
+    ghcm.Client() exits(3) on connection failure, so catch SystemExit to avoid killing the run."""
+    sys.path.insert(0, GHIDRA)
+    try:
+        import ghcm
+    except Exception:
+        return False
+    try:
+        c = ghcm.Client()
+    except (SystemExit, Exception):
+        return False
+    try:
+        p, _ = c.call_tool("health.ping", {}, timeout=15)
+        return isinstance(p, dict) and p.get("status") == "ok"
+    except Exception:
+        return False
+    finally:
+        try:
+            c.close()
+        except Exception:
+            pass
+
+
+def gh_addr_of(fn):
+    code, o, e = sh([PY, os.path.join(GHIDRA, "findfunc.py"), "--file", T, fn])
+    m = re.search(r"0x([0-9a-fA-F]+)\s+" + re.escape(fn) + r"\b", o)
+    return ("0x" + m.group(1)) if m else None
+
+
+# =========================================================== UNIT: ghcm guards
+def unit_ghcm():
+    print("\n## unit: ghcm.py injection guards (no Ghidra server)")
+    sys.path.insert(0, GHIDRA)
+    import importlib
+    import ghcm
+    importlib.reload(ghcm)
+
+    nasties = ['a"b', "a'b", "a\\b", "a\nb", "a\tb", "résumé", '"; import os; os.system("id"); "', "`id`", "$(id)", "x" * 300]
+    for s in nasties:
+        try:
+            lit = ghcm.pylit(s)
+            uassert("ghcm.pylit round-trips %r" % s[:14], (eval(lit) == s) and lit[:1] in ("\"", "'"), "lit=" + lit[:80])
+        except SystemExit:
+            bad("ghcm.pylit round-trips %r" % s[:14], "pylit rejected a legal string")
+    uassert("ghcm.pylit int/bool/None", ghcm.pylit(7) == "7" and ghcm.pylit(True) == "True" and ghcm.pylit(None) == "None")
+    uassert("ghcm.pylit list round-trips", eval(ghcm.pylit([1, 'a"b', True, None])) == [1, 'a"b', True, None])
+
+    def rejects(fn, *a):
+        try:
+            fn(*a); return False
+        except SystemExit as ex:
+            return ex.code == 2
+
+    uassert("ghcm.vsym accepts real symbol", ghcm.vsym("VmDir_a.b::c$x") == "VmDir_a.b::c$x")
+    for b in ["a'b", 'a"b', "a\\b", "a`b", "a;b", "a\nb", "", "x" * 600]:
+        uassert("ghcm.vsym rejects %r" % b[:8], rejects(ghcm.vsym, b))
+    uassert("ghcm.vaddr hex/dec", ghcm.vaddr("0x1000") == 4096 and ghcm.vaddr("4096") == 4096)
+    for b in ["0xZ", "12x", "", "0x" + "f" * 20, "-1", "0x"]:
+        uassert("ghcm.vaddr rejects %r" % b[:10], rejects(ghcm.vaddr, b))
+    uassert("ghcm.vpath accepts", ghcm.vpath("/tmp/a_b.bin") == "/tmp/a_b.bin")
+    for b in ["/tmp/a;rm", "/tmp/$x", "/tmp/a*", "a'b", "/tmp/a`b", "/tmp/a\nb"]:
+        uassert("ghcm.vpath rejects %r" % b[:10], rejects(ghcm.vpath, b))
+    uassert("ghcm.vsection accepts/rejects", ghcm.vsection(".rodata") == ".rodata" and rejects(ghcm.vsection, ".text;x"))
+    uassert("ghcm.vregex accepts/rejects", ghcm.vregex("a.*b|c") == "a.*b|c" and rejects(ghcm.vregex, "a["))
+    uassert("ghcm.vneedle allows quotes / rejects control",
+            ghcm.vneedle('he said "hi"') == 'he said "hi"' and rejects(ghcm.vneedle, "a\x01b"))
+    uassert("ghcm.vprogmatch accepts/rejects", ghcm.vprogmatch("target") == "target" and rejects(ghcm.vprogmatch, "a;b"))
+
+    # build_eval_code(): the un-char-restricted needle must embed as an inert escaped literal
+    payload = '"; import os; os.system("id"); _needle="'
+    code = ghcm.build_eval_code("print('done')", _needle=payload)
+    xlines = [l for l in code.splitlines() if l.startswith("_needle = ")]
+    embedded_ok = bool(xlines) and eval(xlines[0][len("_needle = "):]) == payload
+    no_inj = "os.system" not in "\n".join(l for l in code.splitlines() if not l.startswith("_needle = "))
+    uassert("ghcm.build_eval_code embeds injection as an inert literal", embedded_ok and no_inj,
+            "line=" + (xlines[0] if xlines else "<none>"))
+    uassert("ghcm.build_eval_code wraps body (stdout survives early exit)",
+            "try:" in code and "except SystemExit" in code)
+
+
+# ==================================================== INTEGRATION: ghidra inspect
+def test_ghidra_inspect():
+    print("\n## ghidra: inspect (gh-decompile / find / xrefs / strxref / scansec)")
+    dec = [PY, os.path.join(GHIDRA, "decompile.py")]
+    ff = [PY, os.path.join(GHIDRA, "findfunc.py")]
+    xr = [PY, os.path.join(GHIDRA, "xrefs.py")]
+    sx = [PY, os.path.join(GHIDRA, "strxref.py")]
+    sc = [PY, os.path.join(GHIDRA, "scansec.py")]
+    FA = ["--file", T]
+
+    # decompile
+    expect("gh decompile leaf", dec + FA + ["--name", "leaf"], rc=0, has=[r"leaf", r"return 0x2a|return 42"], nothas=[r"Traceback", r"body error"])
+    expect("gh decompile heap_copy shows copy", dec + FA + ["--name", "heap_copy"], rc=0, has=[r"memcpy\("], nothas=[r"Traceback"])
+    expect("gh decompile missing-name graceful", dec + FA + ["--name", "no_such_fn_zzz"], rc=0, has=[r"no function named"], nothas=[r"Traceback"])
+    expect("gh decompile bad-addr graceful", dec + FA + ["--addr", "0xffffff00"], rc=0, has=[r"no function at"], nothas=[r"Traceback"])
+    expect("gh decompile injection reject", dec + FA + ["--name", "a'b"], rc=2, has=[r"\[reject\]"])
+    expect("gh decompile missing file reject", dec + ["--file", MISSING, "--name", "leaf"], rc=2, has=[r"does not exist"])
+
+    # findfunc
+    expect("gh findfunc substring", ff + FA + ["leaf"], rc=0, has=[r"match 'leaf'", r"leaf"])
+    expect("gh findfunc regex", ff + FA + ["--regex", r"^(big_frame|recurse_sum)$"], rc=0, has=[r"big_frame", r"recurse_sum"])
+    expect("gh findfunc no match", ff + FA + ["zzz_nomatch_zzz"], rc=0, has=[r"0 function\(s\) match"])
+    expect("gh findfunc reject", ff + FA + ["a;b"], rc=2, has=[r"\[reject\]"])
+    a = gh_addr_of("leaf")
+    if a:
+        expect("gh findfunc --addr resolves", ff + FA + ["--addr", a], rc=0, has=[r"leaf"])
+    else:
+        skip("gh findfunc --addr resolves", "could not resolve leaf addr")
+    c1, o1, _ = sh(ff + FA + ["memcpy"])
+    c2, o2, _ = sh(ff + FA + ["memcpy", "--no-imports"])
+    uassert("gh findfunc --no-imports drops thunks", o2.count("0x") < o1.count("0x") or o1.count("0x") == 0,
+            "with=%d no-imports=%d" % (o1.count("0x"), o2.count("0x")))
+
+    # xrefs
+    expect("gh xrefs leaf callers", xr + FA + ["leaf"], rc=0, has=[r"callers \(\d", r"main"])
+    expect("gh xrefs never_called (no callers)", xr + FA + ["never_called"], rc=0, has=[r"callers \(0\)"])
+    expect("gh xrefs not found graceful", xr + FA + ["nope_zzz"], rc=0, has=[r"target function not found"], nothas=[r"Traceback"])
+
+    # strxref (incl. the global-pointer hop -> handler)
+    expect("gh strxref find string + ref", sx + FA + ["MAGIC_HANDLER_STRING"], rc=0, has=[r"MAGIC_HANDLER_STRING_v1", r"handler"])
+    expect("gh strxref --decompile", sx + FA + ["MAGIC_HANDLER_STRING_v1", "--decompile"], rc=0, has=[r"// ===== handler"])
+    expect("gh strxref no match", sx + FA + ["zzz_no_such_string"], rc=0, has=[r"0 string match"])
+    expect("gh strxref adversarial needle safe", sx + FA + ['a"b; import os'], rc=0, has=[r"string match"], nothas=[r"Traceback"])
+
+    # scansec
+    expect("gh scansec list", sc + FA, rc=0, has=[r"blocks / sections \(\d", r"\.text"])
+    expect("gh scansec strings", sc + FA + ["--section", ".rodata", "--strings"], rc=0, has=[r"MAGIC_HANDLER_STRING_v1"])
+    expect("gh scansec ptrs graceful", sc + FA + ["--section", ".data", "--ptrs"], rc=0, has=[r"value\(s\) in"], nothas=[r"Traceback"])
+    expect("gh scansec bad section graceful", sc + FA + ["--section", ".nope", "--strings"], rc=0, has=[r"no section"], nothas=[r"Traceback"])
+    expect("gh scansec unmapped read graceful", sc + FA + ["--read", "0xffffffff00", "--len", "16"], rc=0, has=[r"no data readable"], nothas=[r"Traceback"])
+    _, lo, _ = sh(sc + FA)
+    m = re.search(r"\.rodata\s+0x([0-9a-fA-F]+)", lo)
+    if m:
+        expect("gh scansec read hexdump", sc + FA + ["--read", "0x" + m.group(1), "--len", "32"], rc=0, has=[r"[0-9a-f]{12}  "])
+    else:
+        skip("gh scansec read hexdump", "no .rodata addr")
+
+
+# ====================================================== INTEGRATION: ghidra hunt
+def test_ghidra_hunt():
+    print("\n## ghidra: hunt (gh-callsites / frame / disasm-range / scan)")
+    cs = [PY, os.path.join(GHIDRA, "callsites.py")]
+    fr = [PY, os.path.join(GHIDRA, "frame.py")]
+    dr = [PY, os.path.join(GHIDRA, "disasm-range.py")]
+    scn = [PY, os.path.join(GHIDRA, "scan.py")]
+    FA = ["--file", T]
+
+    expect("gh callsites memcpy", cs + FA + ["--sink", "memcpy"], rc=0, has=[r"call sites to memcpy", r"memcpy\("], nothas=[r"Traceback"])
+    expect("gh callsites --in scope", cs + FA + ["--sink", "memcpy", "--in", "heap_copy"], rc=0, has=[r"within \*heap_copy\*", r"heap_copy"])
+    expect("gh callsites unknown sink graceful", cs + FA + ["--sink", "no_such_sink_zz"], rc=0, has=[r"not found as a function or symbol"], nothas=[r"Traceback"])
+    expect("gh callsites injection reject", cs + FA + ["--sink", "a'b"], rc=2, has=[r"\[reject\]"])
+
+    expect("gh frame single (big_frame)", fr + FA + ["--func", "big_frame"], rc=0, has=[r"stack frame : \d", r"parameters \("])
+    expect("gh frame recursion flag", fr + FA + ["--func", "recurse_sum"], rc=0, has=[r"self-recursive: True"])
+    expect("gh frame --top", fr + FA + ["--top", "8"], rc=0, has=[r"by stack-frame size", r"big_frame"])
+    expect("gh frame not found graceful", fr + FA + ["--func", "nope_zz"], rc=0, has=[r"function not found"], nothas=[r"Traceback"])
+    _, fo, _ = sh(fr + FA + ["--func", "big_frame"])
+    m = re.search(r"stack frame : (\d+)", fo)
+    uassert("gh frame big_frame large (>=2048)", bool(m) and int(m.group(1)) >= 2048, "got: " + (m.group(0) if m else fo[:120]))
+
+    a = gh_addr_of("heap_copy")
+    if a:
+        expect("gh disasm-range window", dr + FA + ["--addr", a, "--count", "6"], rc=0, has=[r"0x[0-9a-f]{12}  \w"])
+    else:
+        skip("gh disasm-range window", "no heap_copy addr")
+    expect("gh disasm-range unmapped graceful", dr + FA + ["--addr", "0xffffffff00", "--count", "4"], rc=0, has=[r"no instruction"], nothas=[r"Traceback"])
+    expect("gh disasm-range bad addr reject", dr + FA + ["--addr", "0xZZ"], rc=2, has=[r"\[reject\]"])
+
+    # gh-scan bug-class finder
+    expect("gh scan all flags fixture bugs", scn + FA + ["--class", "all"], rc=0,
+           has=[r"\[intof\] alloc_table", r"\[fmt\] log_msg", r"copylen"], nothas=[r"Traceback"])
+    expect("gh scan intof only", scn + FA + ["--class", "intof"], rc=0, has=[r"\[intof\] alloc_table"], nothas=[r"\[fmt\]"])
+    expect("gh scan bad class reject", scn + FA + ["--class", "bogus"], rc=2, has=[r"\[reject\]"])
+    expect("gh scan --regex filter", scn + FA + ["--class", "fmt", "--regex", "^log_"], rc=0, has=[r"log_msg", r"across 1 function"])
+
+
+# ============================================== INTEGRATION: ghidra bin wrappers
+def test_ghidra_bin_wrappers():
+    print("\n## ghidra: bin/ wrappers (functional, need server)")
+    B = os.path.join(ROOT, "bin")
+    expect("bin/gh-status", [os.path.join(B, "gh-status")], rc=0, has=[r"ghidra-headless-mcp @"])
+    expect("bin/gh-exec", [os.path.join(B, "gh-exec"), "--file", T, "--code", "print(6*7)"], rc=0, has=[r"\b42\b"])
+    expect("bin/gh-find resolves+runs", [os.path.join(B, "gh-find"), "--file", T, "leaf"], rc=0, has=[r"leaf"])
+    expect("bin/gh-decompile", [os.path.join(B, "gh-decompile"), "--file", T, "--name", "leaf"], rc=0, has=[r"leaf"])
+    expect("bin/gh-callsites", [os.path.join(B, "gh-callsites"), "--file", T, "--sink", "memcpy"], rc=0, has=[r"memcpy\("])
+    expect("bin/gh-scan", [os.path.join(B, "gh-scan"), "--file", T, "--class", "intof"], rc=0, has=[r"\[intof\]"])
+    expect("bin/ injection reject (through wrapper)", [os.path.join(B, "gh-find"), "--file", T, "a';bad"], rc=2, has=[r"\[reject\]"])
 
 
 def main():
@@ -538,6 +762,7 @@ def main():
     print(o.strip())
 
     unit_bncm()                 # always (no BN)
+    unit_ghcm()                 # always (no Ghidra server)
     test_packaging()            # always (manifests, bin wrappers, structure, bn-scan arg-validation)
     test_security()             # tainted-output handling (unit always; evil-binary integration needs caps/MCP)
     have_caps = True
@@ -554,6 +779,11 @@ def main():
         test_inspect(); test_hunt(); test_scanners(); test_bin_wrappers(); test_bulkdecompile()
     else:
         skip("ALL Binary Ninja integration tests", "MCP not reachable at " + MCP_URL)
+
+    if gh_up():
+        test_ghidra_inspect(); test_ghidra_hunt(); test_ghidra_bin_wrappers()
+    else:
+        skip("ALL Ghidra integration tests", "ghidra-headless-mcp not reachable at %s:%d" % (GH_HOST, GH_PORT))
 
     print("\n=== summary: %d passed, %d failed, %d skipped ===" % (P, F, S))
     if FAILS:

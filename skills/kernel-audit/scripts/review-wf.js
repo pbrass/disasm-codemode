@@ -5,6 +5,9 @@ export const meta = {
 }
 
 const FNS = []   // filled by prep_batch.py
+const TARGET = 'the ESXi 8.0.3i vmkernel (ring-0 hypervisor)'   // swapped by prep_batch from profile.review_target
+const ATTACKER = 'malicious guest VM'                            // swapped from profile.review_attacker
+const CONTEXT = 'this is in the guest->host virtual-NIC datapath (Vmxnet3 / E1000 / ENS), so its inputs are largely GUEST-CONTROLLED — TX/RX ring descriptors, packet header bytes, lengths, offsets, counts, MSS/IHL/segment fields.'   // swapped from profile.review_context
 
 const SCHEMA = {
   type: 'object',
@@ -47,11 +50,11 @@ const SCHEMA = {
   },
 }
 
-const PROMPT = (f) => `You are auditing ONE function of the ESXi 8.0.3i vmkernel (ring-0 hypervisor) for memory-safety bugs reachable from a malicious guest VM. This is authorized defensive vulnerability research (an active, scoped penetration test / patch-diff assessment).
+const PROMPT = (f) => `You are auditing ONE function of ${TARGET} for memory-safety bugs reachable from a ${ATTACKER}. This is authorized defensive vulnerability research (an active, scoped penetration test / patch-diff assessment).
 
 FUNCTION: ${f.name} @ ${f.addr}
 Metrics: cyclomatic complexity ${f.cc}, computed-addressing ops ${f.memidx}, sink calls ${f.sink}, distinct input-offset reads ${f.parse}, ${f.insns} instructions.
-Context: this is in the guest->host virtual-NIC datapath (Vmxnet3 / E1000 / ENS), so its inputs are largely GUEST-CONTROLLED — TX/RX ring descriptors, packet header bytes, lengths, offsets, counts, MSS/IHL/segment fields.
+Context: ${CONTEXT}
 
 READ BOTH (use Read; the asm is authoritative for memory arithmetic):
 - HLIL (decompiled, register-agnostic): ${f.hlil}   (NOTE: may be truncated at ~60KB if the function is huge — use the asm for any part the HLIL cuts off)

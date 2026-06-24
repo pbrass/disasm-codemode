@@ -27,6 +27,12 @@ for nm in names:
 tmpl=open(os.path.join(_SD,"review-wf.js")).read()
 _repl="const FNS = "+json.dumps(fns)
 tmpl=re.sub(r'^const FNS = .*$', lambda m: _repl, tmpl, count=1, flags=re.M)
+# profile-driven review framing (target/attacker/context) — keeps the template generic
+_prof=json.load(open(os.environ["KAUDIT_PROFILE"])) if os.environ.get("KAUDIT_PROFILE") else {}
+for _k,_v in [("review_target","const TARGET = "),("review_attacker","const ATTACKER = "),("review_context","const CONTEXT = ")]:
+    if _prof.get(_k):
+        _line=_v+json.dumps(_prof[_k])+"   // (profile)"
+        tmpl=re.sub(r'^'+re.escape(_v)+r'.*$', lambda m,_l=_line: _l, tmpl, count=1, flags=re.M)
 outp=f"{ROOT}/review-wf-b{N}.js"
 open(outp,'w').write(tmpl)
 print(f"batch{N}: {len(fns)}/{len(names)} fns prepped -> {os.path.abspath(outp)}")

@@ -75,7 +75,8 @@ def main():
     for i,r in enumerate(ranked[:40]):
         print(f"{i+1:>3} {r['score']:>6.2f} {r['reach']:>5.2f} {r['cc']:>4} {r['n_memidx']:>6} {r['sink']:>4} {r['parse']:>5} {r['n_insns']:>5}  {r['name']}")
     print("\n=== CALIBRATION: known/interesting anchors ===")
-    for nm in ['E1000ValidateTsoHdrs','Vmxnet3EnsDev_RxWithPerQBuffer','PsaNvmeAddControllerInt','E1000TxTSOSend','E1000DevAsyncTx']:
+    _anchors = _prof.get('anchors', ['E1000ValidateTsoHdrs','Vmxnet3EnsDev_RxWithPerQBuffer','PsaNvmeAddControllerInt','E1000TxTSOSend','E1000DevAsyncTx'])
+    for nm in _anchors:
         if nm in rankmap:
             r=[x for x in ranked if x['name']==nm][0]
             print(f"  #{rankmap[nm]:>5}/{len(ranked)}  score={r['score']:.2f} dist={r['dist']} cc={r['cc']}  {nm}")

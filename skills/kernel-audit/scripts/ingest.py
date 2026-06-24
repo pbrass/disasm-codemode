@@ -17,6 +17,8 @@ if not isinstance(recs,list):
 if not isinstance(recs,list):
     print("could not parse records array"); sys.exit(1)
 con=sqlite3.connect(f"{ROOT}/kreview.db"); cur=con.cursor()
+cur.execute("CREATE TABLE IF NOT EXISTS review(addr INTEGER PRIMARY KEY, name TEXT, reviewed_at TEXT, reviewer TEXT, verdict TEXT, notes TEXT)")
+cur.execute("CREATE TABLE IF NOT EXISTS precondition(id INTEGER PRIMARY KEY, func_addr INTEGER, func_name TEXT, text TEXT, kind TEXT, klass TEXT, sink TEXT, status TEXT, attack_note TEXT)")
 cur.execute("CREATE TABLE IF NOT EXISTS bug(id INTEGER PRIMARY KEY, func_addr INTEGER, func_name TEXT, desc TEXT, location TEXT, severity TEXT, confidence TEXT, why TEXT, status TEXT, bug_class TEXT)")
 try: cur.execute("ALTER TABLE bug ADD COLUMN bug_class TEXT")   # v2 taxonomy migration (idempotent)
 except Exception: pass

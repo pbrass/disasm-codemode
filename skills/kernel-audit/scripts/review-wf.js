@@ -36,7 +36,7 @@ const SCHEMA = {
       type: 'array',
       items: {
         type: 'object',
-        required: ['desc', 'location', 'confidence'],
+        required: ['desc', 'location', 'confidence', 'bug_class'],
         additionalProperties: false,
         properties: {
           desc: { type: 'string' },
@@ -44,6 +44,7 @@ const SCHEMA = {
           severity: { type: 'string' },
           confidence: { type: 'string', enum: ['low', 'med', 'high'] },
           why: { type: 'string' },
+          bug_class: { type: 'string', enum: ['oob', 'int-overflow', 'double-fetch', 'uaf-lifetime', 'uninit-disclosure', 'race', 'type-confusion', 'other'], description: 'the exploited-bug-class taxonomy (v2): oob=plain bounds, int-overflow=size/offset arithmetic wrap, double-fetch=TOCTOU on re-read of attacker memory, uaf-lifetime=use-after-free/dangling, uninit-disclosure=non-zeroed alloc leaked back, race=lock/refcount discipline, type-confusion' },
         },
       },
     },
@@ -69,7 +70,7 @@ METHODOLOGY — contract inference:
 RULES:
 - Be rigorous and HONEST. Do NOT invent bugs. If a bound is checked upstream-but-not-here, record it as a 'caller' precondition, not a bug. Prefer verdict 'needs-caller-analysis' over a speculative 'bug'.
 - Anchor EVERY precondition and suspected bug to a specific HLIL line number or asm address.
-- For suspected_bugs include ONLY items with (a) a concrete unsafe memory operation and (b) a plausible guest-reachable input that violates a precondition; set confidence honestly.
+- For suspected_bugs include ONLY items with (a) a concrete unsafe memory operation and (b) a plausible guest-reachable input that violates a precondition; set confidence honestly, and set bug_class to the exploited-class taxonomy (oob / int-overflow / double-fetch / uaf-lifetime / uninit-disclosure / race / type-confusion / other) — this is not limited to plain bounds errors.
 - For a giant function, focus on the memory-op / sink / computed-index hotspots rather than narrating every block.
 
 Return the structured record (your StructuredOutput call IS the deliverable).`

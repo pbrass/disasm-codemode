@@ -12,6 +12,9 @@ target="$1"
 if printf '%s' "$target" | LC_ALL=C grep -q '[^A-Za-z0-9_./+=-]'; then
   echo "bnopen.sh: path has characters outside [A-Za-z0-9_./+=-]; refusing" >&2; exit 2
 fi
+# Absolutize relative to the CALLER's cwd: Binary Ninja's process cwd may be a plugin dir
+# (e.g. a web-server plugin), so a relative path would resolve there and fail to open.
+target="$(realpath -m -- "$target")"
 exec python3 "$here/binja.py" "
 import binaryninja
 from binaryninjaui import UIContext

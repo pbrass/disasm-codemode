@@ -84,6 +84,32 @@ sharp edges (no `re.compile`/`__import__`; a globals/locals scoping trap that Na
 `raise`/`SystemExit` discards captured stdout; `f.hlil` can be None; BN rebases addresses; output truncates ~100 KB)
 that will waste your time otherwise.
 
+## Annotate as you analyze — the RE sidecar (durable, git-tracked)
+A `.bndb` is a 100s-of-MB blob: useless in a git diff, easy to lose to a re-analysis or an unsaved session.
+So keep your reverse-engineering — function **renames**, **prototypes**, **struct/type decls**, **variable**
+names+types, and **comments / analysis notes** — in a small JSON+C **sidecar** that you author by hand and
+sync INTO the bndb. The sidecar is the source of truth; the bndb is the live artifact you re-hydrate.
+
+- **`bn-re-apply SIDECAR.json --bv-match <tab>`** — push the sidecar into the open tab (preview). Then **Ctrl+S**
+  in the GUI to persist (the GUI owns the open .bndb — a tool-side save races it). For a headless save, apply to
+  a copy: `--file /abs/copy.bndb --save`.
+- **`bn-re-vars --bv-match <tab> <fn>`** — list a function's variables with their stable **identifiers** (+ current
+  name/type + the function's address), so the sidecar's `vars` section is easy to author.
+
+Idempotent: types are applied first, functions are matched by **address**, variables by **identifier** — re-running
+converges (never duplicates). **Comments and analyses can be arbitrarily long and multi-line** — nothing is capped or
+truncated; write as much as the analysis needs. Annotate continuously *as you read each function* (a one-line purpose
+comment + a real name beats a perfect write-up later). Sidecar schema + an example are in `scripts/re_sync.py`.
+
+```jsonc
+{ "types_c": "struct VmxState { uint32_t hdr_len; uint64_t flags; void *payload; };",
+  "functions": { "0x140001000": {
+      "name": "Vmx_HandleFoo",
+      "comment": "ANALYSIS: reconciles guest hdr_len vs descriptor TSO field; caller-owed bound, not re-checked here.",
+      "vars": { "576460752290840576": {"name": "ctx", "type": "struct VmxState*"} },
+      "line_comments": { "0x140001020": "OOB-relevant copy site" } } } }
+```
+
 ## Bug-class scanners (BN HLIL)
 `bn-scan <class> <binary-or-bndb>` runs a scanner and prints candidates — it finds **candidates, not bugs**, so
 triage every hit to a verdict:

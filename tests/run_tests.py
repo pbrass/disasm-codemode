@@ -403,6 +403,7 @@ def test_packaging():
     expected = ["bn-decompile", "bn-find", "bn-xrefs", "bn-strxref", "bn-scansec", "bn-callsites",
                 "bn-frame", "bn-disasm-range", "bn-scan", "bn-cap-scan", "bn-symdiff",
                 "bn-bulk-decompile", "bn-open", "bn-status", "bn-exec", "bn-audit-sync",
+                "bn-re-apply", "bn-re-vars",
                 "gh-decompile", "gh-find", "gh-xrefs", "gh-strxref", "gh-scansec", "gh-callsites",
                 "gh-frame", "gh-disasm-range", "gh-scan", "gh-exec", "gh-status"]
     have = set(os.listdir(BIN)) if os.path.isdir(BIN) else set()
@@ -442,6 +443,9 @@ def test_packaging():
     uassert("binary-audit has sync_to_bv + ingest scripts", all(os.path.exists(os.path.join(BA, "scripts", s)) for s in (
         "sync_to_bv.py", "ingest.py", "ingest_deciders.py", "ingest_guestentry.py")))
     uassert("no stale kernel-audit skill dir", not os.path.isdir(os.path.join(ROOT, "skills", "kernel-audit")))
+    # binary-ninja RE-sync: the sidecar apply + var-inspect scripts
+    uassert("binary-ninja has re_sync + re_vars scripts", all(os.path.exists(os.path.join(BNJA, s)) for s in (
+        "re_sync.py", "re_vars.py")))
     # bn-scan argument validation (no MCP needed — wrapper checks args first)
     expect("bn-scan unknown-class reject", [os.path.join(BIN, "bn-scan"), "nope_class", TO], rc=2, has=[r"unknown class"])
     expect("bn-scan missing-target usage", [os.path.join(BIN, "bn-scan"), "intof"], rc=2, has=[r"usage"])
@@ -874,6 +878,62 @@ def test_binary_audit_live():
         shutil.rmtree(td, ignore_errors=True)
 
 
+def test_re_sync_live():
+    """MCP: bn-re-apply pushes a sidecar (rename, struct, var retype, function + line comments incl. a
+    LONG multi-line analysis) into a bndb, persists it, and an independent reload confirms it landed
+    intact — long comments must NOT be truncated. Then re-apply for idempotency."""
+    print("\n## binary-ninja: re_sync sidecar -> bndb apply/persist (needs MCP)")
+    import tempfile, shutil
+    td = tempfile.mkdtemp(prefix="resync_live_")
+    try:
+        tgt = os.path.join(td, "target_copy")
+        shutil.copy(T, tgt)
+        bndb = tgt + ".bndb"
+        # 'leaf' exists in the fixture; build a sidecar with a LONG multi-line comment (~5 KB)
+        _base = "RECON: the caller-owed length bound is not re-checked here; a missing upstream clamp yields a stack OOB write. "
+        long_comment = "\n\n".join("[para %d] %s" % (i, _base * 3) for i in range(1, 12)) + "\n\nTAIL_MARKER_RESYNC"
+        leaf_addr = addr_of("leaf")
+        if not leaf_addr:
+            return skip("re_sync live", "could not resolve leaf addr")
+        side = {
+            "binary": "target_copy",
+            "types_c": "struct ReSyncProbe { uint32_t a; uint64_t b; void *c; };",
+            "functions": {leaf_addr: {
+                "name": "leaf_RESYNC",
+                "comment": long_comment,
+                "line_comments": {leaf_addr: "fn entry note"},
+            }},
+        }
+        sp = os.path.join(td, "side.json"); open(sp, "w").write(json.dumps(side))
+        apply = os.path.join(ROOT, "bin", "bn-re-apply")
+        code, o, e = sh([apply, sp, "--file", tgt, "--save"])
+        blob = o + "\n" + e
+        uassert("re-apply reports applied", bool(re.search(r"\[re-sync\] applied:.*funcs=1", blob)), blob[:300])
+        uassert("re-apply --file --save persists", bool(re.search(r"saved -> ", blob)) and os.path.exists(bndb), blob[:300])
+        # idempotency: second apply yields the same func count, no item errors
+        code2, o2b, e2b = sh([apply, sp, "--file", bndb, "--save"])
+        uassert("re-apply idempotent (no errors)", "funcs=1" in (o2b + e2b) and "item error" not in (o2b + e2b), (o2b + e2b)[:300])
+        # independent reload of the saved db: name + struct + LONG comment intact
+        rd = ("f=_bv.get_functions_by_name('leaf_RESYNC');c=(f[0].comment if f else '') or '';"
+              "st=_bv.get_type_by_name('ReSyncProbe');"
+              "print('RB',int(bool(f)),len(c),int(c.rstrip().endswith('TAIL_MARKER_RESYNC')),int('\\n\\n[para 11]' in c),int(st is not None))")
+        rc3, o3, e3 = sh([PY, "-c",
+            "import sys;sys.path.insert(0,%r);import bncm;bncm.run(%r,_file=%r,_bvmatch=None)" % (INSPECT, rd, bndb)])
+        m = re.search(r"RB (\d) (\d+) (\d) (\d) (\d)", o3 + e3)
+        if not m:
+            bad("re_sync persisted readback", "no RB line", (o3 + e3)[:300])
+        else:
+            uassert("persisted: function renamed", m.group(1) == "1")
+            uassert("persisted: long comment intact (len==authored)", int(m.group(2)) == len(long_comment), "got %s want %d" % (m.group(2), len(long_comment)))
+            uassert("persisted: comment tail not truncated", m.group(3) == "1")
+            uassert("persisted: multi-line structure intact", m.group(4) == "1")
+            uassert("persisted: struct type defined", m.group(5) == "1")
+    except Exception as e:
+        bad("re_sync live", repr(e))
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
 def main():
     print("=== disasm-codemode test suite ===")
     print("[*] building fixtures ...")
@@ -898,7 +958,7 @@ def main():
         skip("cap_scan/symdiff suite", "capstone/pyelftools not in this python")
 
     if mcp_up():
-        test_inspect(); test_hunt(); test_scanners(); test_bin_wrappers(); test_bulkdecompile(); test_binary_audit_live()
+        test_inspect(); test_hunt(); test_scanners(); test_bin_wrappers(); test_bulkdecompile(); test_binary_audit_live(); test_re_sync_live()
     else:
         skip("ALL Binary Ninja integration tests", "MCP not reachable at " + MCP_URL)
 

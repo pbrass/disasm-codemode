@@ -3,6 +3,24 @@
 All notable changes to disasm-codemode. Versioning is semantic (MAJOR.MINOR.PATCH); pre-1.0,
 minor versions may add features and refine interfaces.
 
+## 0.8.0 — 2026-06-25
+
+### New: `bn-re-apply` / `bn-re-vars` — annotate in a git-tracked sidecar, sync into the bndb
+Reverse-engineering work (function renames, prototypes, struct/type decls, variable names+types, and
+**comments / long analysis notes**) now lives in a small hand-authored **sidecar** (JSON + C) that syncs INTO
+a Binary Ninja database — so the analysis is reviewable, diff-able in git, and re-appliable to a fresh `.bndb`
+in one command, instead of trapped in a 100s-of-MB blob.
+- **`bn-re-apply SIDECAR.json (--bv-match|--file) [--save]`** (`skills/binary-ninja/scripts/re_sync.py`) —
+  idempotent apply: **types first**, functions matched by **address**, variables by stable **identifier**;
+  sets function + line **comments**, prototypes, var names/types, data symbols. Open-tab → persist with Ctrl+S
+  (the GUI owns the db); `--file --save` saves headless. Reuses the `bn-audit-sync` save model.
+- **`bn-re-vars (--bv-match|--file) <fn>`** (`re_vars.py`) — list a function's variables with their stable
+  identifiers (+ name/type, + the function address) so the sidecar's `vars` section is easy to author.
+- **No length caps.** Comments/analyses are passed through verbatim — verified a 6.9 KB, multi-line analysis
+  round-trips into the bndb byte-for-byte (tests assert `len == authored`, tail intact, multi-line preserved).
+- Docs: a new "Annotate as you analyze" section in the binary-ninja SKILL with the schema + example.
+- Tests: +9 checks (packaging + a live apply/persist/idempotency/long-comment round-trip). Suite now 215/0.
+
 ## 0.7.4 — 2026-06-25
 
 ### Test coverage for `binary-audit` (the suite had none)

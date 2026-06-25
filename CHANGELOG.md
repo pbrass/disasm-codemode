@@ -3,6 +3,22 @@
 All notable changes to disasm-codemode. Versioning is semantic (MAJOR.MINOR.PATCH); pre-1.0,
 minor versions may add features and refine interfaces.
 
+## 0.7.4 — 2026-06-25
+
+### Test coverage for `binary-audit` (the suite had none)
+The whole `binary-audit` skill — including the new `bn-audit-sync` comment/tag writer and the ingest
+scripts — was untested. Added 20 checks to `tests/run_tests.py`:
+- **packaging** — `bn-audit-sync` in the `bin/` wrapper set; the `binary-audit` skill dir + `sync_to_bv.py` +
+  ingest scripts present; no stale `kernel-audit/` dir.
+- **`unit_binary_audit` (no MCP, always runs)** — `build_items()` emits one `[binaudit]…[/binaudit]`-wrapped
+  comment with the **full** bug desc + guest_path (unique tail tokens asserted present, zero `…`), includes the
+  caller-owed precondition and **excludes** the self-checked one, tags `confirmed-violable`→`violable`, and is
+  deterministic/regenerable; plus the ingest cap (a 1500-char summary + 2000-char bug desc survive intact past
+  the old 600 clip).
+- **`test_binary_audit_live` (needs MCP)** — `bn-audit-sync --file --save` annotates + persists, and an
+  independent reload of the saved `.bndb` confirms the comment survived in full (markers + both tails, no
+  truncation) — the end-to-end regression guard for the 0.7.2 save fix and 0.7.3 full-text.
+
 ## 0.7.3 — 2026-06-25
 
 ### Ledger ingest: stop clipping the narrative fields

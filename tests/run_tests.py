@@ -402,7 +402,7 @@ def test_packaging():
     # bin/ wrappers present, executable, shebang'd
     expected = ["bn-decompile", "bn-find", "bn-xrefs", "bn-strxref", "bn-scansec", "bn-callsites",
                 "bn-frame", "bn-disasm-range", "bn-scan", "bn-cap-scan", "bn-symdiff",
-                "bn-bulk-decompile", "bn-open", "bn-status", "bn-exec",
+                "bn-bulk-decompile", "bn-open", "bn-status", "bn-exec", "bn-audit-sync",
                 "gh-decompile", "gh-find", "gh-xrefs", "gh-strxref", "gh-scansec", "gh-callsites",
                 "gh-frame", "gh-disasm-range", "gh-scan", "gh-exec", "gh-status"]
     have = set(os.listdir(BIN)) if os.path.isdir(BIN) else set()
@@ -435,6 +435,13 @@ def test_packaging():
         "callsites.py", "frame.py", "disasm-range.py", "scan.py", "ghexec.py", "ghstatus.py")))
     uassert("ghidra reference guide present",
             os.path.exists(os.path.join(ROOT, "skills", "ghidra", "reference", "ghidra-codemode-guide.md")))
+    # binary-audit skill: SKILL.md + the ledger->bndb sync script + ingest scripts (renamed from kernel-audit)
+    BA = os.path.join(ROOT, "skills", "binary-audit")
+    uassert("binary-audit skill present (renamed from kernel-audit)",
+            os.path.exists(os.path.join(BA, "SKILL.md")) and os.path.isdir(os.path.join(BA, "scripts")))
+    uassert("binary-audit has sync_to_bv + ingest scripts", all(os.path.exists(os.path.join(BA, "scripts", s)) for s in (
+        "sync_to_bv.py", "ingest.py", "ingest_deciders.py", "ingest_guestentry.py")))
+    uassert("no stale kernel-audit skill dir", not os.path.isdir(os.path.join(ROOT, "skills", "kernel-audit")))
     # bn-scan argument validation (no MCP needed — wrapper checks args first)
     expect("bn-scan unknown-class reject", [os.path.join(BIN, "bn-scan"), "nope_class", TO], rc=2, has=[r"unknown class"])
     expect("bn-scan missing-target usage", [os.path.join(BIN, "bn-scan"), "intof"], rc=2, has=[r"usage"])
@@ -753,6 +760,120 @@ def test_ghidra_bin_wrappers():
     expect("bin/ injection reject (through wrapper)", [os.path.join(B, "gh-find"), "--file", T, "a';bad"], rc=2, has=[r"\[reject\]"])
 
 
+# ============================================ binary-audit: ledger -> bndb sync
+BA_SCRIPTS = os.path.join(ROOT, "skills", "binary-audit", "scripts")
+
+
+def _mk_ledger(path, func="leaf", status="confirmed-violable"):
+    """Build a minimal binary-audit ledger with one reviewed function carrying a bug, a caller-owed +
+    a self-checked precondition, and a Stage-3 audit. Long desc/guest_path with unique tail tokens so a
+    truncation regression is caught. Returns (long_desc, long_path)."""
+    import sqlite3
+    db = sqlite3.connect(path)
+    db.executescript(
+        "CREATE TABLE review(addr INTEGER PRIMARY KEY, name TEXT, reviewed_at TEXT, reviewer TEXT, verdict TEXT, notes TEXT);"
+        "CREATE TABLE precondition(id INTEGER PRIMARY KEY, func_addr INTEGER, func_name TEXT, text TEXT, kind TEXT, klass TEXT, sink TEXT, status TEXT, attack_note TEXT);"
+        "CREATE TABLE bug(id INTEGER PRIMARY KEY, func_addr INTEGER, func_name TEXT, desc TEXT, location TEXT, severity TEXT, confidence TEXT, why TEXT, status TEXT, bug_class TEXT);"
+        "CREATE TABLE audit(id INTEGER PRIMARY KEY, func_name TEXT, verdict TEXT, evidence TEXT, guest_path TEXT, residual TEXT, next TEXT, confidence TEXT, guard TEXT);")
+    longdesc = ("server-controlled stripe index used unclamped as an array subscript; " * 30) + "DESC_TAIL_ZZZ"
+    longpath = ("rogue MDS -> GETDEVICEINFO -> XDR decode -> verbatim copy -> dispatch; " * 20) + "PATH_TAIL_ZZZ"
+    db.execute("INSERT INTO review VALUES(?,?,?,?,?,?)", (0x1000, func, "t", "wf", "needs-caller-analysis", "n"))
+    db.execute("INSERT INTO bug(func_name,desc,bug_class,status) VALUES(?,?,?,?)", (func, longdesc, "oob", status))
+    db.execute("INSERT INTO precondition(func_name,text,kind,klass) VALUES(?,?,?,?)", (func, "CALLER_OWED_MARKER stripe index < count", "len-bound", "caller"))
+    db.execute("INSERT INTO precondition(func_name,text,kind,klass) VALUES(?,?,?,?)", (func, "SELF_CHECKED_MARKER internal boilerplate", "nonnull", "self"))
+    db.execute("INSERT INTO audit(func_name,verdict,guest_path) VALUES(?,?,?)", (func, status, longpath))
+    db.commit(); db.close()
+    return longdesc, longpath
+
+
+def unit_binary_audit():
+    """No MCP: the comment-builder (build_items) + the ingest cap. The actual BN write is the live test below."""
+    print("\n## binary-audit: ledger -> comment build (no MCP)")
+    import tempfile, shutil, sqlite3
+    sys.path.insert(0, BA_SCRIPTS)
+    try:
+        import sync_to_bv  # imports bncm (stdlib only — no MCP call at import)
+    except Exception as e:
+        return bad("import sync_to_bv", repr(e))
+    td = tempfile.mkdtemp(prefix="ba_unit_")
+    try:
+        led = os.path.join(td, "kreview.db")
+        longdesc, longpath = _mk_ledger(led)
+        items = sync_to_bv.build_items(led, False, 0)
+        uassert("build_items: one function", len(items) == 1, "got %d" % len(items))
+        c = items[0]["comment"] if items else ""
+        uassert("comment wrapped in [binaudit] markers", c.startswith("[binaudit]") and c.rstrip().endswith("[/binaudit]"))
+        uassert("full bug desc, no truncation", "DESC_TAIL_ZZZ" in c and "…" not in c, c[-80:])
+        uassert("full guest_path, no truncation", "PATH_TAIL_ZZZ" in c)
+        uassert("caller-owed precondition included", "CALLER_OWED_MARKER" in c)
+        uassert("self-checked precondition excluded", "SELF_CHECKED_MARKER" not in c)
+        uassert("tag mirrors confirmed-violable", items and items[0]["tag"] == "violable", "tag=%r" % (items[0]["tag"] if items else None))
+        uassert("build_items deterministic / regenerable", sync_to_bv.build_items(led, False, 0) == items)
+    except Exception as e:
+        bad("build_items run", repr(e))
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+    # ingest cap: a long review summary + bug desc must survive well past the old 600-char clip
+    print("## binary-audit: ingest cap (no MCP)")
+    td2 = tempfile.mkdtemp(prefix="ba_ing_")
+    try:
+        cx = sqlite3.connect(os.path.join(td2, "kreview.db"))
+        cx.execute("CREATE TABLE func(addr INTEGER, name TEXT)"); cx.commit(); cx.close()  # ingest.py looks it up
+        wf = [{"function": "leaf", "verdict": "reviewed", "summary": "S" * 1500,
+               "preconditions": [{"text": "P" * 40, "kind": "len-bound", "klass": "caller"}],
+               "suspected_bugs": [{"desc": "B" * 2000, "bug_class": "oob"}]}]
+        wfp = os.path.join(td2, "wf.json"); open(wfp, "w").write(json.dumps(wf))
+        env = dict(os.environ, KAUDIT_ROOT=td2)
+        p = subprocess.run([PY, os.path.join(BA_SCRIPTS, "ingest.py"), wfp], capture_output=True, text=True, env=env, timeout=60)
+        cx = sqlite3.connect(os.path.join(td2, "kreview.db"))
+        rev = cx.execute("SELECT notes FROM review WHERE name='leaf'").fetchone()
+        bg = cx.execute("SELECT desc FROM bug WHERE func_name='leaf'").fetchone()
+        cx.close()
+        uassert("ingest runs clean", p.returncode == 0 and "Traceback" not in (p.stdout + p.stderr), (p.stdout + p.stderr)[:300])
+        uassert("ingest keeps 1500-char summary (past old 600 cap)", rev and rev[0] and len(rev[0]) == 1500, "len=%r" % (len(rev[0]) if rev and rev[0] else None))
+        uassert("ingest keeps bug desc uncapped", bg and bg[0] and len(bg[0]) == 2000)
+    except Exception as e:
+        bad("ingest cap run", repr(e))
+    finally:
+        shutil.rmtree(td2, ignore_errors=True)
+
+
+def test_binary_audit_live():
+    """MCP: bn-audit-sync --file --save writes the comment+tag and PERSISTS it; reload proves full text survived."""
+    print("\n## binary-audit: sync -> bndb write/save/persist (needs MCP)")
+    import tempfile, shutil
+    td = tempfile.mkdtemp(prefix="ba_live_")
+    try:
+        led = os.path.join(td, "kreview.db")
+        _mk_ledger(led, func="leaf")           # 'leaf' exists in the fixture target
+        tgt = os.path.join(td, "target_copy")
+        shutil.copy(T, tgt)
+        bndb = tgt + ".bndb"
+        sync = os.path.join(ROOT, "bin", "bn-audit-sync")
+        code, o, e = sh([sync, led, "--file", tgt, "--save"])
+        blob = o + "\n" + e
+        uassert("sync --file --save annotates 1 fn", bool(re.search(r"annotated 1 function", blob)), blob[:300])
+        uassert("sync --file --save reports saved", bool(re.search(r"saved -> ", blob)) and os.path.exists(bndb) and os.path.getsize(bndb) > 0, blob[:300])
+        # reload the SAVED db independently (object load, no tab) and confirm the comment persisted in full
+        rd = ("f=_bv.get_functions_by_name('leaf');c=(f[0].comment if f else '') or '';"
+              "print('READBACK',int('[binaudit]' in c),int('DESC_TAIL_ZZZ' in c),int('PATH_TAIL_ZZZ' in c),c.count(chr(8230)))")
+        rc2, o2, e2 = sh([PY, "-c",
+            "import sys;sys.path.insert(0,%r);import bncm;bncm.run(%r,_file=%r,_bvmatch=None)" % (INSPECT, rd, bndb)])
+        m = re.search(r"READBACK (\d) (\d) (\d) (\d+)", o2 + e2)
+        if not m:
+            bad("sync persisted-comment readback", "no READBACK line", (o2 + e2)[:300])
+        else:
+            uassert("persisted: [binaudit] marker present", m.group(1) == "1")
+            uassert("persisted: full bug desc", m.group(2) == "1")
+            uassert("persisted: full guest_path", m.group(3) == "1")
+            uassert("persisted: zero truncation marks", m.group(4) == "0")
+    except Exception as e:
+        bad("binary-audit live sync", repr(e))
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
 def main():
     print("=== disasm-codemode test suite ===")
     print("[*] building fixtures ...")
@@ -765,6 +886,7 @@ def main():
     unit_ghcm()                 # always (no Ghidra server)
     test_packaging()            # always (manifests, bin wrappers, structure, bn-scan arg-validation)
     test_security()             # tainted-output handling (unit always; evil-binary integration needs caps/MCP)
+    unit_binary_audit()         # always (no BN): ledger->comment builder + ingest caps
     have_caps = True
     try:
         import capstone, elftools  # noqa
@@ -776,7 +898,7 @@ def main():
         skip("cap_scan/symdiff suite", "capstone/pyelftools not in this python")
 
     if mcp_up():
-        test_inspect(); test_hunt(); test_scanners(); test_bin_wrappers(); test_bulkdecompile()
+        test_inspect(); test_hunt(); test_scanners(); test_bin_wrappers(); test_bulkdecompile(); test_binary_audit_live()
     else:
         skip("ALL Binary Ninja integration tests", "MCP not reachable at " + MCP_URL)
 

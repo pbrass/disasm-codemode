@@ -39,11 +39,12 @@ import bncm  # shared MCP client + injection-safe run()/validators
 
 
 BODY = r'''
-import json, binaryninja as _bn
+import json, re as _re, binaryninja as _bn
 _spec = json.loads(_spec_json)
-_n = {"types": 0, "funcs": 0, "protos": 0, "vars": 0, "fcomments": 0, "lcomments": 0, "data": 0}
+_n = {"types": 0, "funcs": 0, "protos": 0, "vars": 0, "fcomments": 0, "lcomments": 0, "data": 0, "typestubs": 0}
 _miss = []
 _errs = []
+_stubbed = set()
 
 # 1) TYPES FIRST -- structs/enums/typedefs, so later prototypes & var types can reference them.
 _tc = (_spec.get("types_c") or "").strip()
@@ -74,11 +75,32 @@ for _addr_s in _funcs:
         try: _f.name = _fd["name"]; _n["funcs"] += 1
         except Exception as _e: _errs.append("%s name: %r" % (_addr_s, _e))
     if _fd.get("proto"):
+        _proto = _fd["proto"]
         try:
-            _pt = _bv.parse_type_string(_fd["proto"])
+            _pt = _bv.parse_type_string(_proto)
             _f.type = _pt[0]; _n["protos"] += 1
         except Exception as _e:
-            _errs.append("%s proto: %r" % (_addr_s, _e))
+            # a prototype often names inferred struct types that aren't declared yet -> forward-declare them
+            # as opaque structs (captures the type intel for later) and retry once.
+            _unk = _re.findall(r"unknown type name '([^']+)'", str(_e)) + _re.findall(r"[Rr]eference to unknown type (\w+)", str(_e))
+            for _ut in _unk:
+                if _ut in _stubbed:
+                    continue
+                try:
+                    _r2 = _bv.parse_types_from_string("struct %s; typedef struct %s %s;" % (_ut, _ut, _ut))
+                    for _qn2, _t2 in _r2.types.items():
+                        _bv.define_user_type(_qn2, _t2)
+                    _stubbed.add(_ut); _n["typestubs"] += 1
+                except Exception:
+                    pass
+            if _unk:
+                try:
+                    _pt = _bv.parse_type_string(_proto)
+                    _f.type = _pt[0]; _n["protos"] += 1
+                except Exception as _e2:
+                    _errs.append("%s proto: %r" % (_addr_s, _e2))
+            else:
+                _errs.append("%s proto: %r" % (_addr_s, _e))
     if _fd.get("comment"):
         try: _f.comment = _fd["comment"]; _n["fcomments"] += 1
         except Exception as _e: _errs.append("%s comment: %r" % (_addr_s, _e))

@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# disasm-codemode wrapper -> binary-audit ledger -> BinaryView comments/tags sync
+root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}"
+exec python3 "$root/skills/binary-audit/scripts/sync_to_bv.py" "$@"

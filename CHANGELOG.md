@@ -3,6 +3,23 @@
 All notable changes to disasm-codemode. Versioning is semantic (MAJOR.MINOR.PATCH); pre-1.0,
 minor versions may add features and refine interfaces.
 
+## 0.7.0 — 2026-06-25
+
+### Rename: `kernel-audit` → `binary-audit`
+The skill audits any large symbol-rich binary (userspace daemons, libraries, firmware), not just kernels —
+the name now says so. Skill dir + `name:` renamed; SKILL/METHODOLOGY note "(formerly kernel-audit)". No
+`bin/` wrappers or marketplace entries referenced the old name.
+
+### New: `bn-audit-sync` — push the ledger back into the disassembler
+`skills/binary-audit/scripts/sync_to_bv.py` + `bin/bn-audit-sync`. Writes the ledger's findings into the
+BinaryView as **function comments + a `binaudit` tag**, optionally persisting a snapshot to the `.bndb` — so
+the analysis is visible in BN and travels with the database. Each comment carries the review verdict, every
+`bug` (class/status/desc), the caller-owed **preconditions** (the attack surface), and the Stage-3/4 audit
+verdict + guest path; the tag mirrors the strongest signal (`violable`/`latent`/`gated`/`suspected`/`refuted`/
+`review`). Comments are wrapped in `[binaudit]…[/binaudit]` markers and **regenerable** (re-run replaces, never
+duplicates). Injection-safe (reuses `bncm`'s validated-literal embedding). Verified end-to-end: 80 functions
+of the nfs41client ledger annotated + saved to the `.bndb` + survived a fresh reload.
+
 ## 0.6.0 — 2026-06-25
 
 ### Binary Ninja independence: load reliably, pick the right tab, self-bootstrap the MCP

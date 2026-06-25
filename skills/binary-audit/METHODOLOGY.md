@@ -2,7 +2,7 @@
 
 A repeatable, skill-able pipeline for auditing a large symbol-rich kernel: **rank → contract-infer →
 attack the contract.** Built 2026-06-23. Target = `$KAUDIT_BIN` (27,265 funcs). Generalizes to
-any symbol-rich binary; intended to become a `kernel-audit` skill/plugin (give-back).
+any symbol-rich binary; the `binary-audit` skill (give-back).
 
 ## The thesis
 Most memory-safety bugs are **broken contracts**: a function assumes something about its inputs (a length

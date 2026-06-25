@@ -1,7 +1,7 @@
 ---
-name: kernel-audit
+name: binary-audit
 description: >
-  Rank the functions of a large symbol-rich binary by memory-safety bug-likelihood
+  (formerly kernel-audit.) Rank the functions of a large symbol-rich binary by memory-safety bug-likelihood
   (reachability × cyclomatic complexity × memory-arithmetic × sink/parser signature), then drive a
   function-by-function CONTRACT-INFERENCE review that records a queryable PRECONDITION LEDGER — which
   becomes the worklist for caller-side violation hunting. Use when auditing a kernel / hypervisor / driver /
@@ -12,9 +12,11 @@ description: >
   bounds — so adversarial verification + the guard taxonomy are part of the skill, not an afterthought.
 ---
 
-# kernel-audit — rank → contract-infer → attack → live-validate
+# binary-audit — rank → contract-infer → attack → live-validate
 
-*Generalized from the ESXi 8.0.3 vmkernel engagement; examples (e1000 TSO, vmxnet3 queue-count) are illustrative. Point `seed_regex` at any attack surface — see `profiles/generic-c.json`.*
+*(formerly `kernel-audit` — renamed because it audits any large symbol-rich binary, not just kernels.)
+Generalized from the ESXi 8.0.3 vmkernel engagement; examples (e1000 TSO, vmxnet3 queue-count) are
+illustrative. Point `seed_regex` at any attack surface — see `profiles/generic-c.json`.*
 
 ## Thesis
 Most memory-safety bugs are **broken contracts**: a function assumes something about its inputs (a length
@@ -271,7 +273,25 @@ Validated on a 252-function review + a 28-bug phase-2 audit, all via background 
   contract verification not exploit-dev" produced calibrated verdicts (clean/needs-caller-analysis dominate;
   bugs are flagged with confidence + caller-audit targets, not fabricated).
 
+## Sync the ledger back into the disassembler (`bn-audit-sync`)
+Write the ledger's findings into the BinaryView as **function comments + a `binaudit` tag**, so the analysis
+is visible in BN and travels with the `.bndb` (or a teammate's). Each comment is wrapped in
+`[binaudit]…[/binaudit]` markers and is **regenerable** — re-run after the ledger updates and the block is
+replaced, not duplicated.
+```bash
+bn-audit-sync LEDGER.db --bv-match <substr>          # preview: write comments into the OPEN tab (in memory)
+bn-audit-sync LEDGER.db --bv-match <substr> --save   # + persist a snapshot to its .bndb
+bn-audit-sync LEDGER.db --file /abs/path.bndb --save # load fresh, annotate, save
+bn-audit-sync LEDGER.db --bv-match <substr> --all    # also annotate functions reviewed 'clean'
+```
+Each comment carries the review verdict, every `bug` (class/status/desc), the **caller-owed preconditions**
+(`klass` in caller/unguaranteed — the attack surface), and the Stage-3/4 `audit` verdict + guest path. The
+tag value mirrors the strongest signal (`violable` / `latent` / `gated` / `suspected` / `refuted` / `review`)
+for one-glance triage + filtering in the GUI. Annotates any function with a bug, an audit, or a non-clean
+review by default. (Ghidra: the equivalent — `setComment(PLATE_COMMENT)` + labels inside a transaction, saved
+to the project — is straightforward via `gh-exec`; not yet wrapped.)
+
 ## Composes with
 `disasm-codemode` (bn-/gh- decompile for the HLIL+asm the review reads), `sbom-kb` (version-debt findings),
-the precondition ledger format is the durable, shareable artifact. Generic beyond ESXi — point `seed_regex`
-at any attack surface.
+the precondition ledger format is the durable, shareable artifact. **`bn-audit-sync` pushes it back into the
+`.bndb` as comments/tags.** Generic beyond ESXi — point `seed_regex` at any attack surface.

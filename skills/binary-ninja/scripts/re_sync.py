@@ -74,7 +74,7 @@ for _addr_s in _funcs:
     if _fd.get("name"):
         try: _f.name = _fd["name"]; _n["funcs"] += 1
         except Exception as _e: _errs.append("%s name: %r" % (_addr_s, _e))
-    if _fd.get("proto"):
+    if _do_protos and _fd.get("proto"):
         _proto = _fd["proto"]
         try:
             _pt = _bv.parse_type_string(_proto)
@@ -105,10 +105,11 @@ for _addr_s in _funcs:
         try: _f.comment = _fd["comment"]; _n["fcomments"] += 1
         except Exception as _e: _errs.append("%s comment: %r" % (_addr_s, _e))
     # variables keyed by stable identifier; build an id->var map from the live function
+    _vspec = (_fd.get("vars") or {}) if _do_vars else {}
     _vmap = {}
-    for _vv in _f.vars:
-        _vmap[_vv.identifier] = _vv
-    _vspec = _fd.get("vars") or {}
+    if _vspec:
+        for _vv in _f.vars:
+            _vmap[_vv.identifier] = _vv
     for _vid_s in _vspec:
         _vinfo = _vspec[_vid_s]
         try: _vid = int(_vid_s)
@@ -131,7 +132,9 @@ for _addr_s in _funcs:
             _f.set_comment_at(int(_ca_s, 16), _lc[_ca_s]); _n["lcomments"] += 1
         except Exception as _e:
             _errs.append("%s linecmt %s: %r" % (_addr_s, _ca_s, _e))
-    _f.reanalyze()
+    # NOTE: no per-function reanalyze() — names/comments need none, and forcing it 100s of times floods
+    # BN's analysis queue (a 700-function apply spent ~400s in analysis). Setting .type already queues
+    # incremental analysis; we trigger ONE background update at the end if any types/vars changed.
 
 # 3) DATA VARS
 _dv = _spec.get("data_vars") or {}
@@ -149,6 +152,13 @@ for _da_s in _dv:
         _n["data"] += 1
     except Exception as _e:
         _errs.append("data %s: %r" % (_da_s, _e))
+
+# one background analysis pass to absorb the queued type/var changes (names+comments need none)
+if (_n["protos"] or _n["vars"]):
+    try:
+        _bv.update_analysis()   # non-blocking; BN settles in the background
+    except Exception:
+        pass
 
 _parts = []
 for _k in _n:
@@ -183,6 +193,8 @@ def main():
     ap.add_argument("sidecar", help="path to the RE sidecar JSON")
     bncm.add_target_args(ap)  # --file / --bv-match (one required)
     ap.add_argument("--save", action="store_true", help="persist a snapshot to the .bndb (else preview in memory)")
+    ap.add_argument("--no-protos", action="store_true", help="skip prototypes — names+comments need NO analysis, so a bulk apply is instant; setting 100s of types is what makes BN churn. Apply protos in a separate/final pass.")
+    ap.add_argument("--no-vars", action="store_true", help="skip variable renames/types (also analysis-triggering)")
     args = ap.parse_args()
     if not os.path.exists(args.sidecar):
         bncm.die("sidecar not found: %s" % args.sidecar)
@@ -195,6 +207,8 @@ def main():
     params = bncm.target_params(args)
     params["_spec_json"] = json.dumps(spec)
     params["_save"] = bool(args.save)
+    params["_do_protos"] = not args.no_protos
+    params["_do_vars"] = not args.no_vars
     bncm.run(BODY, **params)
 
 

@@ -85,10 +85,27 @@ def main():
     batch = json.load(open(args.batch))
     if not isinstance(batch, list) or not batch:
         sys.exit("batch is empty or not a list")
-    js = TEMPLATE.replace("__BATCH__", json.dumps(batch))
-    with open(args.out, "w") as fh:
-        fh.write(js)
-    print("[make-wf] wrote %s  (%d functions)  -> run: Workflow(scriptPath=%r)" % (args.out, len(batch), os.path.abspath(args.out)))
+    # chunk so each emitted script stays under the Workflow 512 KB limit (batch JSON + the ~2 KB template)
+    LIMIT = 460000
+    chunks, cur, cursize = [], [], 0
+    for rec in batch:
+        rsz = len(json.dumps(rec)) + 2
+        if cur and cursize + rsz > LIMIT:
+            chunks.append(cur); cur, cursize = [], 0
+        cur.append(rec); cursize += rsz
+    if cur:
+        chunks.append(cur)
+    base = args.out[:-3] if args.out.endswith(".js") else args.out
+    outs = []
+    for i, ch in enumerate(chunks, 1):
+        p = args.out if len(chunks) == 1 else "%s.%03d.js" % (base, i)
+        with open(p, "w") as fh:
+            fh.write(TEMPLATE.replace("__BATCH__", json.dumps(ch)))
+        outs.append((p, len(ch)))
+    for p, n in outs:
+        print("[make-wf] wrote %s  (%d functions)" % (p, n))
+    if len(outs) > 1:
+        print("[make-wf] %d chunks -> run Workflow(scriptPath=...) for each (the limit is 512 KB/script)" % len(outs))
 
 
 if __name__ == "__main__":

@@ -107,7 +107,9 @@ def main():
     hlil = {a: t for a, t in db.execute("SELECT addr, text FROM hlil")}
     db.close()
     for a in batch:
-        recs["0x%x" % a]["hlil"] = hlil.get(a, "")
+        # cap embedded HLIL: the naming signal is in the head + the strings/callees, and the whole batch must
+        # fit a Workflow script (<512 KB). Big functions rarely need more than this to name.
+        recs["0x%x" % a]["hlil"] = hlil.get(a, "")[:3000]
 
     out = list(recs.values())
     with open(args.out, "w") as fh:

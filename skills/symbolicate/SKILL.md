@@ -71,6 +71,14 @@ exact name for Pass 1), `domain_tags` (the attack-surface clusters), and the nam
 copy + retarget `log_prefix_re`/`domain_tags` for other ecosystems.
 
 ## Operational notes
+- **Apply cadence — names+comments are free, prototypes are NOT.** Setting a function name or comment needs no
+  analysis (a 739-function `bn-re-apply` is ~0.3s). Setting a *prototype* queues incremental analysis, so a big
+  batch of them makes BN churn (a 700-fn apply with protos spent ~400s in analysis). So during the churn, sync
+  with **`bn-re-apply … --no-protos --no-vars`** (instant — browse the named binary live), and apply prototypes
+  **once at the end** (or in small batches, or not at all — names+comments are the deliverable; protos are a
+  bonus). The sidecar always holds the protos; you choose when to pay for them.
+- **Don't re-apply the whole sidecar every wave if it's slow** — names+comments are cheap so it's usually fine,
+  but you can apply just the wave's new functions. The bndb is the live view; the sidecar is the source of truth.
 - **Attack-surface first.** Prioritize the device/backdoor domains (the engagement's interest) in the first
   waves, then expand — `domain` tags + `--spread` make this easy.
 - **Trial the tier before the churn.** Run ~50–100 with `--spread`, eyeball Haiku-tier vs Sonnet-tier quality,

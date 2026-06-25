@@ -3,6 +3,38 @@
 All notable changes to disasm-codemode. Versioning is semantic (MAJOR.MINOR.PATCH); pre-1.0,
 minor versions may add features and refine interfaces.
 
+## 0.5.0 — 2026-06-24
+
+### New skill: kernel-audit
+Rank → contract-infer → attack → live-validate memory-safety auditor for large symbol-rich binaries
+(kernel/hypervisor/driver). Ranks functions by a reachability×bug-likelihood `BugScore`, drives a parallel
+per-function contract-inference review into a queryable **precondition ledger** (sqlite), then attacks the
+caller-owed preconditions and live-validates candidates on a reachability/exploitability ladder. Includes the
+`extract.py`/`score.py` pipeline, `prep_batch`/`review-wf` parallel harness, `ingest*` loaders, the
+`esxi-vmkernel`/`generic-c` profiles, and `METHODOLOGY.md`. Validated on real ESXi engagements (tcpip4, vmci).
+
+### kernel-audit refinements (this release)
+- **Profile-driven retargeting**: `anchors` (calibration set) and `review_target`/`review_attacker`/
+  `review_context` (Stage-2 review framing) are now profile fields — point the pipeline at a new module by
+  editing JSON, no script edits. `score.py` prints the profile's anchors; `prep_batch.py` splices the framing.
+- **v2 bug-class taxonomy in the review schema**: `suspected_bugs` now carry `bug_class`
+  (oob/int-overflow/double-fetch/uaf-lifetime/uninit-disclosure/race/type-confusion) so the ledger is sliceable by class.
+- **Fresh-ledger robustness**: `ingest.py` creates the `review`/`precondition` tables on a brand-new ledger
+  (previously assumed a hand-initialized db).
+- **Methodology (SKILL.md)**: calibrate on attacker-entry handlers when there's no prior bug; Stage 3 scopes the
+  **full** caller-owed surface (spicy attacker-value bounds vs kernel-internal boilerplate vs UAF/race residue),
+  and reachability is traced through the entry chain that may live *outside* the audited binary.
+
+### bn-open
+- Absolutize the target path (`realpath`) so opens are independent of Binary Ninja's process cwd — a
+  plugin web-server cwd was making relative `.bndb` paths fail to open.
+
+## 0.4.0 — 2026-06-22
+
+### New skill: go-re
+Reverse stripped Go binaries via the `pclntab` (`go-list`/`go-diff`/`go-xref`/`go-addr`) — function inventory,
+cross-binary patch-diff, xrefs, and addr→name where BN/Ghidra/symdiff/ghidriff struggle on large stripped Go.
+
 ## 0.3.0 — 2026-06-22
 
 A second engine: the **ghidra** skill brings the bn-inspect/bn-hunt toolkit to Ghidra over

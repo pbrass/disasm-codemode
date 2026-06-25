@@ -79,10 +79,17 @@ rationale (why each feature, how to weight, the reachability multiplier) is in `
 - `weights` — per-feature multipliers in `BugScore = Reach · Σ wᵢ·percentile(featureᵢ)`; bump `n_memidx`
   (corruption mechanism), `n_arith` (the v2 int-overflow lens), `state_calls` (UAF/race) for the v2 classes.
 - `gamma`, `floor` — the reachability decay and the floor for direct-edge-unreachable functions.
+- `anchors` (optional) — the calibration set: function names whose rank `score.py` prints at the end. Put your
+  **known bugs** (or, for a fresh target with none, the **known attacker-entry handlers**) here and confirm they
+  land in the top percentile before trusting the ranking. Defaults to the ESXi device anchors if omitted.
+- `review_target` / `review_attacker` / `review_context` (optional) — the per-target framing spliced into the
+  Stage-2 review prompt (what binary, who the attacker is, what the guest/remote-controlled inputs are). Set
+  these so the reviewers hunt the *right* classes (e.g. mbuf/TLV parsing for a net stack, queue-pair/datagram
+  size math for VMCI) instead of the default device-datapath framing. Omitted → the ESXi vmkernel-datapath default.
 Ship two: `esxi-vmkernel.json` (device backends + storage-target + net + VMCI/hypercall + UW-syscall + VSI)
 and `generic-c.json` (parser/IO/ioctl + libc/alloc sinks). **To target a new binary: copy `generic-c.json`,
-set `seed_regex` to your input handlers, optionally re-weight, run extract+score — then CALIBRATE** (confirm a
-known bug lands in the top percentile). No profile arg → ESXi defaults.
+set `seed_regex` to your input handlers, set `anchors` + the `review_*` framing, optionally re-weight, run
+extract+score — then CALIBRATE** (confirm an anchor lands in the top percentile). No profile arg → ESXi defaults.
 
 ### Review (Stage 2) — produces one ledger record per function
 For each ranked function (call-tree order from the roots — a hot root pulls in its callees):
@@ -100,6 +107,22 @@ The parallel implementation (`review-wf*.js`) fans out one subagent per function
 Phase-1 records what each function *assumes*; Stage 3 decides whether each caller-owed assumption is actually
 **established** (safe) or **violable** (a real bug) by tracing the upstream callers. This is a distinct,
 parallelizable pass — *not* re-reading the function in isolation.
+
+**Scope Stage 3 to the FULL caller-owed surface, not just the reviewer-flagged `suspected_bugs`.** The bugs are
+the sharp tips; the real worklist is every `caller`/`unguaranteed` precondition (often 5–10× as many). Triage it
+first or you'll either drown or under-cover:
+- **spicy** = an *attacker-controlled value* (packet/datagram/descriptor field) feeds a size/index/offset bound
+  (`field-consistency`/`no-overflow`/`signed`/`len-bound`/`range`). **Trace these** — they're the memory-corruption surface.
+- **boilerplate** = a *kernel-internal* contract owed by a trusted caller ("mbuf valid", "inpcb ref-held",
+  "lock held", nonnull on an internal ptr). Lower yield; characterize, don't chase each one.
+- **UAF/race residue** = the `unguaranteed` `lifetime`/`lock`/`state` preconds — a *separate* pass from the
+  size/offset trace (different question: is the object ref/lock-held across use, and can a concurrent context
+  free it). Don't let the spicy-size triage silently drop these.
+Slice it with SQL (`SELECT func_name,kind,klass,attack_note FROM precondition WHERE klass IN('caller','unguaranteed')`)
+and fan out one agent per consumer (the tcpip4/vmci runs used ad-hoc `verify-wf`/`trace-wf`/`uaf-wf` scripts in
+the same shape as `phase2-wf`). **Reachability often hinges on a layer OUTSIDE the audited binary** — the entry
+chain that delivers attacker input (e.g. whether a guest can hold the socket fd that reaches a vmkernel ioctl):
+trace *who registers/invokes the entry handler* before claiming guest→host, or you'll over- or under-rate severity.
 ```
 scripts/prep_phase2.py N         # for phase2-batches.json[N-1]: per bug fn, pull its caller-owed preconditions
                               # + its callers (lynchpins) from the edge table, extract HLIL+asm, emit phase2-wf-bN.js
@@ -141,6 +164,11 @@ Validate the *ranker* the way you'd validate a model: confirm your **known bugs 
 before trusting the ranking (here: `E1000TxTSOSend` #11, `E1000DevAsyncTx` #29). If it can't surface what
 you already found, retune weights/seeds. Likewise validate the *methodology*: run the review loop on a known
 bug and confirm it reproduces that bug's precondition violation.
+**No prior bug to anchor on (a fresh module)?** Anchor instead on the **known attacker-entry handlers** — the
+functions a guest/remote attacker provably drives (datagram/queue-pair/doorbell dispatch, packet `*_input`,
+ioctl/DevControl) — and confirm *they* land top-percentile. That validates `seed_regex`+weights even without a
+ground-truth defect. (tcpip4: prior findings F2/F3/F5 as anchors; vmci: no priors → anchored on
+`VMCIQPBrokerAllocInt`/`VMCIDatagram_Dispatch`/the VMK-devops handlers, all top-14/599.)
 
 ## The ledger schema (sqlite — created/migrated by the scripts)
 - **func**(addr, name, size, n_insns, cc, loops, n_mem, n_memidx, n_arith, n_call, n_callind, sink_calls,

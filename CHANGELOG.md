@@ -3,6 +3,20 @@
 All notable changes to disasm-codemode. Versioning is semantic (MAJOR.MINOR.PATCH); pre-1.0,
 minor versions may add features and refine interfaces.
 
+## 0.7.2 — 2026-06-25
+
+### `bn-audit-sync` — full text + reliable save
+- **Full annotation text (no truncation).** The 0.7.1 word-boundary cap still elided the *end* of long
+  preconditions/bug-descs (the actual bound being violated) with a `…`. Comments now carry the **complete**
+  ledger text — only collapsed to one wrapped line per entry (BN/Ghidra wrap it). An audit annotation should
+  read as a complete thought.
+- **Fixed `--save`.** Two bugs: (1) an open-tab tool-side save raced the GUI that owns the `.bndb`
+  (`database is locked`) and a separate `load()` couldn't even see it; (2) the `--file` save used a nested
+  `def` whose body referenced top-level names — illegal in the code-mode sandbox → `NameError: _serr`. Now:
+  **open tab** (`--bv-match`) sets comments live and prints "persist with Ctrl+S" (the GUI owns the db);
+  **`--file --save`** loads its own BV and saves directly (no closure, no race) — verified to persist across a
+  fresh independent reload.
+
 ## 0.7.1 — 2026-06-25
 
 ### `bn-audit-sync` readability

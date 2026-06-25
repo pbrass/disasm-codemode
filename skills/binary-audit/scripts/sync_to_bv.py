@@ -27,10 +27,12 @@ def _clean(name):
     return name.split(" @ ")[0].strip() if name else name
 
 
-def _trunc(s, n):
-    # truncate at a word boundary with an ellipsis, so comment lines don't cut mid-word
-    s = " ".join((s or "").split())  # collapse whitespace/newlines to keep one tidy line
-    if len(s) <= n:
+def _oneline(s, n=None):
+    # collapse whitespace/newlines so the ledger paragraph becomes ONE tidy line (BN wraps it).
+    # Full text by default — an audit annotation should be complete; only cap if n is given (safety),
+    # truncating at a word boundary with an ellipsis.
+    s = " ".join((s or "").split())
+    if n is None or len(s) <= n:
         return s
     cut = s[:n].rsplit(" ", 1)[0]
     return (cut if len(cut) >= n * 0.6 else s[:n]) + "…"
@@ -73,15 +75,15 @@ def build_items(db_path, include_all, limit):
         # blank lines between sections so multi-bug/precond functions stay scannable.
         lines = ["[binaudit]  verdict: %s" % (reviews.get(name) or "reviewed")]
         for b in bugs.get(name, [])[:4]:
-            lines += ["", "BUG (%s, %s):" % (b["bug_class"] or "?", b["status"] or "open"), "  %s" % _trunc(b["desc"], 600)]
+            lines += ["", "BUG (%s, %s):" % (b["bug_class"] or "?", b["status"] or "open"), "  %s" % _oneline(b["desc"])]
         callers = preconds.get(name, [])[:4]
         if callers:
             lines.append("")
             lines.append("CALLER-OWED PRECONDITIONS:")
             for p in callers:
-                lines.append("  - [%s/%s] %s" % (p["kind"] or "?", p["klass"] or "?", _trunc(p["text"], 500)))
+                lines.append("  - [%s/%s] %s" % (p["kind"] or "?", p["klass"] or "?", _oneline(p["text"])))
         for a in audits.get(name, [])[:2]:
-            lines += ["", "STAGE-3 (%s): %s" % (a["verdict"] or "?", _trunc(a["guest_path"], 500))]
+            lines += ["", "STAGE-3 (%s): %s" % (a["verdict"] or "?", _oneline(a["guest_path"]))]
         lines.append("[/binaudit]")
         items.append({"name": name, "comment": "\n".join(lines), "tag": tag_for(name)})
         if limit and len(items) >= limit:
@@ -116,11 +118,23 @@ for _it in _items:
             _f.add_tag(_tt, _it["tag"]); _tagged += 1
         except Exception:
             pass
-if _save:
+if _save and not _file:
+    # OPEN TAB: the GUI owns the .bndb. A tool-side save races/locks it and a separate load() may not even
+    # see it. Comments are already set in the live view -> let the GUI persist them.
+    print("[binaudit] comments set in the live tab (visible now). To PERSIST: save in the GUI (Ctrl+S) — it "
+          "owns this database. For a tool-side save, run on a copy: --file /abs/copy.bndb --save.")
+elif _save:
+    # --file: the tool loaded this BV itself (no GUI owns it) -> save directly. (No nested def / closure:
+    # in the code-mode sandbox a def body can't see these top-level names -> NameError.)
+    _tgt = _file if _file.endswith(".bndb") else (_file + ".bndb")
     try:
-        _bv.file.save_auto_snapshot(); print("[binaudit] saved snapshot to the .bndb")
+        if _file.endswith(".bndb"):
+            _bv.file.save_auto_snapshot()
+        else:
+            _bv.create_database(_tgt)
+        print("[binaudit] saved -> %s" % _tgt)
     except Exception as _e:
-        print("[binaudit] SAVE FAILED: %r -- for an open tab the GUI owns the db; save in the GUI, or use --file /abs/copy.bndb --save" % _e)
+        print("[binaudit] SAVE FAILED: %r" % _e)
 print("[binaudit] annotated %d function(s); %d not found in BV; %d tagged.%s" % (_set, _miss, _tagged, "" if _save else "  (preview -- pass --save to persist)"))
 '''
 

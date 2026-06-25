@@ -38,7 +38,7 @@ for r in recs:
     if p: p["status"]="done"; p["verdict"]=v
     wl.setdefault("audited",{})[d]=v
     cur.execute("INSERT INTO audit(func_name,verdict,evidence,guest_path,residual,next,confidence) VALUES(?,?,?,?,?,?,?)",
-      (d,v,(r.get('evidence') or '')[:1800]+f"  [decides {c}]",(r.get('guest_reachable_path') or '')[:600],(r.get('residual_unknowns') or '')[:300],(r.get('recommended_next') or '')[:200],r.get('confidence','')))
+      (d,v,(r.get('evidence') or '')[:8000]+f"  [decides {c}]",(r.get('guest_reachable_path') or '')[:8000],(r.get('residual_unknowns') or '')[:2000],(r.get('recommended_next') or '')[:1000],r.get('confidence','')))
     newstatus=None
     if v in TERM:
         newstatus=TERM[v]
@@ -50,8 +50,8 @@ for r in recs:
         elif depth>=MAXDEPTH:                                newstatus='exhausted-depthcap' # tooling limit (resumable)
         else:
             b=cur.execute("SELECT desc FROM bug WHERE func_name=? LIMIT 1",(c,)).fetchone()
-            wl["frontier"].append({"consumer":c,"decider":d2,"bug_desc":(b[0] if b else c)[:600],
-                "precondition":(r.get('recommended_next') or '')[:300],"status":"pending","depth":depth+1})
+            wl["frontier"].append({"consumer":c,"decider":d2,"bug_desc":(b[0] if b else c)[:2000],
+                "precondition":(r.get('recommended_next') or '')[:1000],"status":"pending","depth":depth+1})
     if newstatus:
         cur.execute("UPDATE bug SET status=? WHERE func_name=? AND status NOT IN ('confirmed-violable')", (newstatus,c))
 con.commit(); json.dump(wl,open(WL,'w'),indent=0)

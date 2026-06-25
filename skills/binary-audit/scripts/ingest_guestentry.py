@@ -22,7 +22,7 @@ for r in recs:
     v=r.get('verdict','needs-live-poc'); st=MAP.get(v,'candidate-needs-poc'); tally[v]=tally.get(v,0)+1
     ev=f"[DEEP-DIVE {v}] {r.get('oob_primitive','')} | impact: {r.get('impact','')} | {r.get('evidence','')}"
     cur.execute("INSERT INTO audit(func_name,verdict,evidence,guest_path,residual,next,confidence) VALUES(?,?,?,?,?,?,?)",
-      (c, 'deepdive-'+v, ev[:2000], (r.get('guest_input') or '')[:600], (r.get('external_blocker') or '')[:300], '', r.get('confidence','')))
+      (c, 'deepdive-'+v, ev[:8000], (r.get('guest_input') or '')[:8000], (r.get('external_blocker') or '')[:2000], '', r.get('confidence','')))
     cur.execute("UPDATE bug SET status=? WHERE func_name=?", (st,c))
 con.commit()
 print("deep-dive verdicts:", tally)

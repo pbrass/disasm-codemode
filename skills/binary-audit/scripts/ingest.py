@@ -28,7 +28,7 @@ for rec in recs:
     nm=rec.get('function')
     a=cur.execute("SELECT addr FROM func WHERE name=?", (nm,)).fetchone()
     addr=a[0] if a else None
-    cur.execute("INSERT OR REPLACE INTO review VALUES(?,?,?,?,?,?)",(addr,nm,'2026-06-23','wf',rec.get('verdict'),(rec.get('summary') or '')[:600]))
+    cur.execute("INSERT OR REPLACE INTO review VALUES(?,?,?,?,?,?)",(addr,nm,'2026-06-23','wf',rec.get('verdict'),(rec.get('summary') or '')[:4000]))
     for p in rec.get('preconditions') or []:
         cur.execute("INSERT INTO precondition(func_addr,func_name,text,kind,klass,sink,status,attack_note) VALUES(?,?,?,?,?,?,?,?)",
           (addr,nm,p.get('text'),p.get('kind'),p.get('klass'),p.get('sink',''),'open',p.get('attack_note',''))); n_p+=1

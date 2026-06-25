@@ -3,6 +3,17 @@
 All notable changes to disasm-codemode. Versioning is semantic (MAJOR.MINOR.PATCH); pre-1.0,
 minor versions may add features and refine interfaces.
 
+## 0.7.3 — 2026-06-25
+
+### Ledger ingest: stop clipping the narrative fields
+`bn-audit-sync` renders the ledger faithfully — but the ledger itself was clipping the audit/review prose at
+ingest, so a `STAGE-3` path or decider `evidence` could read as a complete-looking sentence that was actually
+cut mid-clause (e.g. a `guest_path` capped at 600 chars). Raised the caps **way** up where the analyst
+narrative lives: `audit.guest_path`/`evidence` 600/1800 → **8000**, `residual` → 2000, `next` → 1000,
+`review.summary` 600 → 4000, decider-frontier fields up too (`ingest.py`, `ingest_deciders.py`,
+`ingest_guestentry.py`). `precondition.text` and `bug.desc` were already uncapped. Caps are now a runaway
+backstop, not an editor. (Pre-existing rows stay as-stored — re-ingest to refill.)
+
 ## 0.7.2 — 2026-06-25
 
 ### `bn-audit-sync` — full text + reliable save

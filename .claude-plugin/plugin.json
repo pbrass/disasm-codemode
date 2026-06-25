@@ -1,6 +1,6 @@
 {
   "name": "disasm-codemode",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Drive a disassembler/decompiler headlessly via its code-mode MCP for reverse engineering, binary patch-diffing, and memory-safety bug-class scanning. Engines: Binary Ninja and Ghidra, plus a native toolkit (gore) for stripped Go binaries.",
   "author": { "name": "Phil Brass" },
   "license": "MIT",

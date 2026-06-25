@@ -119,6 +119,13 @@ def vpath(s, what="file"):
             die("%s contains forbidden character %r" % (what, b))
     if not re.fullmatch(r"[A-Za-z0-9_./ +=-]{1,4096}", s):
         die("%s has invalid characters (allowed: letters digits _ . / space + = -)" % what)
+    # ABSOLUTIZE against the CALLER's cwd: binaryninja.load() runs inside the BN GUI process via
+    # /execute, whose cwd is some plugin dir (e.g. seeinglogic_ariadne/web). A relative path would
+    # resolve THERE and fail ("File not found" / "Unable to create new BinaryView"). Same fix as
+    # bnopen.sh. The result is re-checked against the allowed charset (cwd is trusted but be safe).
+    s = os.path.abspath(s)
+    if not re.fullmatch(r"[A-Za-z0-9_./ +=-]{1,4096}", s):
+        die("%s absolutized to a path with invalid characters" % what)
     return s
 
 
@@ -173,21 +180,31 @@ if _file:
         print("[bn-inspect] ERROR: could not load %r (%s)" % (_file, _e))
         raise SystemExit
 else:
+    _matches = []   # (name, bv) for every OPEN tab whose name contains the substring
+    _open = []
     try:
         from binaryninjaui import UIContext
         for _ctx in UIContext.allContexts():
             for _vv, _nm in _ctx.getAvailableBinaryViews():
+                _open.append(_nm)
                 if _bvmatch and _bvmatch in _nm:
-                    _bv = _vv
+                    _matches.append((_nm, _vv))
     except Exception:
         pass
-    if _bv is None:
-        try:
-            _bv = binja._bv
-        except Exception:
-            _bv = None
+    if len(_matches) == 1:
+        _bv = _matches[0][1]
+    elif len(_matches) > 1:
+        # the "three tabs open, can't get the one I want" footgun: refuse to guess. List them.
+        print("[bn-inspect] ERROR: --bv-match %r is AMBIGUOUS (%d open tabs match): %s. Use a more specific substring."
+              % (_bvmatch, len(_matches), [m[0] for m in _matches]))
+        raise SystemExit
+    else:
+        # NO silent fallback to the active tab (that picked the wrong binary). Show what IS open.
+        print("[bn-inspect] ERROR: no open BN tab matches %r. Open tabs: %s. bn-open <ABS path> to add it, or use --file <ABS path>."
+              % (_bvmatch, _open or "(none open)"))
+        raise SystemExit
 if _bv is None:
-    print("[bn-inspect] ERROR: no BinaryView. Give --file PATH (headless) or open the tab and use --bv-match SUBSTR.")
+    print("[bn-inspect] ERROR: no BinaryView. Give --file <ABS path> (loads in the GUI process) or open the tab and use --bv-match SUBSTR.")
     raise SystemExit
 '''
 
@@ -204,8 +221,10 @@ def execute(code):
 def add_target_args(ap):
     """Standard --file / --bv-match selection (mutually exclusive, one required)."""
     g = ap.add_mutually_exclusive_group(required=True)
-    g.add_argument("--file", help="path to a binary to load HEADLESS (validated)")
-    g.add_argument("--bv-match", help="substring of an OPEN BN GUI tab name to use (no reload)")
+    # --file loads a FRESH BinaryView object inside the BN GUI process via /execute (NOT standalone
+    # headless, which a Personal license forbids). Path is absolutized -> pass any path, abs or rel.
+    g.add_argument("--file", help="path to a binary to load fresh as its own BinaryView (no tab; abs or rel, auto-absolutized)")
+    g.add_argument("--bv-match", help="substring of an OPEN BN GUI tab name to use (no reload); must match exactly one tab")
 
 
 def target_params(args):

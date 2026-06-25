@@ -17,10 +17,49 @@ to find the bug a patch fixed).
 
 ## Prerequisites
 - Binary Ninja (Personal edition is fine — code runs in the GUI's own Python, no headless license).
-- The **code-mode MCP** BN plugin serving `127.0.0.1:42069` (e.g. `akrutsinger/binja-codemode-mcp`:
-  `Plugins > MCP Code Mode > Start Server`). Verify with **`bn-status`**.
+- The **code-mode MCP** BN plugin serving `127.0.0.1:42069` (e.g. `akrutsinger/binja-codemode-mcp`).
+  The user must: open the BN GUI, load ≥1 file, then click the MCP-server button in the **bottom-left
+  corner** of the main window (see "Loading a binary independently" below). Verify with **`bn-status`**.
 - Python deps for the BN-independent tools: `pip install capstone pyelftools`.
 - Endpoint overrides: env `BINJA_MCP_URL` / `BINJA_MCP_KEY`.
+
+## Loading a binary independently — the #1 trip-up (read this)
+"Headless" in this skill means **your Python runs in BN's GUI-process interpreter via the `/execute` MCP** —
+it does **NOT** mean standalone `python3 -c "import binaryninja"`. A **Personal** license REJECTS standalone
+headless (`RuntimeError: License is not valid`). Once the GUI + MCP are up, you open and select binaries
+**yourself** — never ask the user to load or switch tabs. Two rules prevent ~all the friction:
+
+1. **Always go through the MCP, never standalone.** Use `bn-exec '<py>'`, `bn-* --file`, or the
+   `mcp__binja-codemode__execute` tool. NEVER run `python3 … import binaryninja …` directly (no license
+   seat → fails). The MCP runs in the licensed GUI process where `binaryninja.load()` works.
+2. **Always use ABSOLUTE paths.** BN's process cwd is some plugin dir (e.g. `…/seeinglogic_ariadne/web`);
+   a *relative* path resolves THERE → `File not found` / `Unable to create new BinaryView`. `bn-* --file`
+   now auto-absolutizes; `bn-exec` / `mcp execute` do **not** — pass `/abs/path` to `binaryninja.load()`.
+
+Two ways to get a BinaryView (both agent-driven, both via the MCP):
+
+| you want | how | tab? |
+|---|---|---|
+| a fresh object for a specific binary (one-off, or a binary not open) | `bn-* --file /abs/path` · or in bn-exec/execute: `bv = binaryninja.load("/abs/path", update_analysis=False)` | **no tab** ("just an object") |
+| an already-open, fully-analyzed binary (esp. a big pre-analyzed `.bndb`) | `bn-open /abs/path` to add the tab, then `bn-* --bv-match <substr>` | tab |
+
+- **`bn-status` first** — shows MCP up/down **and lists every open tab**. `--bv-match` must match exactly
+  ONE open tab; it now ERRORS on ambiguity / no-match (with the tab list) instead of silently grabbing the
+  active tab — the old "three tabs open, can't get the one I want" footgun.
+- `mcp__binja-codemode__execute`'s `binja` global is only ever the **ACTIVE** tab. To work on a specific
+  binary regardless of which tab is active, `binaryninja.load("/abs/path")` your own object instead.
+- `update_analysis=False` = fast triage load; `=True` (or open a pre-analyzed `.bndb`) for full xrefs.
+- **Getting the MCP up.** If `bn-status` says NOT reachable:
+  - **Self-bootstrap (if the auto-start hook is installed + you have a display).** Install once:
+    `cat skills/binary-ninja/scripts/mcp_autostart_startup.py >> ~/.binaryninja/startup.py`. Then YOU launch
+    BN — `DISPLAY=:0 <BN>/binaryninja /abs/path/to/file &` — and the MCP comes up on `:42069` with **no
+    clicks** (verified: GUI launches + loads the file, the hook calls `plugin_instance.start_server(bv)`).
+    Wait ~15s, re-check `bn-status`. *(Enabling the MCP otherwise has no CLI flag / no auto-start setting —
+    it's a GUI button — which is why the startup.py hook exists.)*
+  - **Otherwise ask the user**, in order: **(1)** open the BN GUI; **(2)** load ≥1 file (any binary/`.bndb` —
+    the MCP won't start with no view open); **(3)** **click the MCP-server button in the bottom-left corner**
+    of the main window (binds `:42069`). Re-check `bn-status`.
+  - Everything after — opening/selecting any other binaries — is yours; never ask them to load or switch tabs.
 
 ## Command-line tools
 Installed, these are on your PATH (from a local clone, use `bin/<cmd>` or `python3 skills/.../scripts/<file>`):
@@ -34,9 +73,10 @@ Installed, these are on your PATH (from a local clone, use `bin/<cmd>` or `pytho
 ## Core loop — run Python inside BN
 `bn-exec` POSTs a Python string to `/execute` and prints captured stdout (so always `print()`):
 ```bash
-bn-exec 'print(binja.get_binary_status())'                 # what's open in the GUI
-# load ANY file headlessly (a cached .bndb is faster than re-analyzing):
-bn-exec 'import binaryninja; bv=binaryninja.load("/path/bin", update_analysis=True); print(len(list(bv.functions)))'
+bn-exec 'print(binja.get_binary_status())'                 # what's open in the GUI (binja = the ACTIVE tab)
+# load ANY file as its own object (runs in BN's GUI process, NOT standalone; ABSOLUTE path required;
+# a cached .bndb loads faster than re-analyzing a raw binary):
+bn-exec 'import binaryninja; bv=binaryninja.load("/abs/path/bin", update_analysis=True); print(len(list(bv.functions)))'
 ```
 Each `/execute` call is **stateless** — re-`import` and re-`load` every call; to diff two builds, load both in the
 *same* call. **Read `reference/mcp-codemode-guide.md` before writing non-trivial scripts** — the exec sandbox has

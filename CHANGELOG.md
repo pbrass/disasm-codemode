@@ -3,6 +3,26 @@
 All notable changes to disasm-codemode. Versioning is semantic (MAJOR.MINOR.PATCH); pre-1.0,
 minor versions may add features and refine interfaces.
 
+## 0.6.0 — 2026-06-25
+
+### Binary Ninja independence: load reliably, pick the right tab, self-bootstrap the MCP
+Root-caused why an agent sometimes loads binaries freely and sometimes gets stuck asking the user. It was
+never a license/GUI-seat split — it was two operator footguns + missing docs:
+- **Fix — `bn-* --file` now absolutizes the path** (`bncm.py:vpath`). A *relative* `--file`/`load()` path
+  resolved against BN's **process cwd** (a plugin dir, e.g. `…/seeinglogic_ariadne/web`) → `File not found` /
+  `Unable to create new BinaryView`. (Same `realpath` fix `bnopen.sh` already had.)
+- **Change — `--bv-match` no longer silently grabs the active tab.** It now ERRORS on *ambiguous* (substring
+  matches >1 open tab) or *no match* (prints the open-tab list) — killing the "three tabs open, can't get the
+  one I want" footgun.
+- **Feature — `bn-status` lists every open tab** (not just the active binary), so `--bv-match` is pickable.
+- **New — `skills/binary-ninja/scripts/mcp_autostart_startup.py`**: append to `~/.binaryninja/startup.py` and
+  the agent can self-bootstrap BN with **zero clicks** — `DISPLAY=:0 binaryninja /abs/file &` launches the
+  GUI, loads the file, and the hook auto-starts the MCP on `:42069` (verified end-to-end).
+- **Docs — new "Loading a binary independently" section** in the binary-ninja SKILL: never run standalone
+  `python3 import binaryninja` (a Personal license rejects it — go through the `/execute` MCP); always use
+  absolute paths; the object (`--file`/`load()`) vs open-tab (`--bv-match`/`bn-open`) decision; and the exact
+  human MCP-bootstrap steps (open GUI → load ≥1 file → click the bottom-left server button).
+
 ## 0.5.0 — 2026-06-24
 
 ### New skill: kernel-audit

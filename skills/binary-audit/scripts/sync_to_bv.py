@@ -27,6 +27,15 @@ def _clean(name):
     return name.split(" @ ")[0].strip() if name else name
 
 
+def _trunc(s, n):
+    # truncate at a word boundary with an ellipsis, so comment lines don't cut mid-word
+    s = " ".join((s or "").split())  # collapse whitespace/newlines to keep one tidy line
+    if len(s) <= n:
+        return s
+    cut = s[:n].rsplit(" ", 1)[0]
+    return (cut if len(cut) >= n * 0.6 else s[:n]) + "…"
+
+
 def build_items(db_path, include_all, limit):
     db = sqlite3.connect(db_path)
     db.row_factory = sqlite3.Row
@@ -60,13 +69,19 @@ def build_items(db_path, include_all, limit):
     for name in sorted(names):
         if not name:
             continue
-        lines = ["[binaudit] %s" % (reviews.get(name) or "reviewed")]
+        # full text per entry (collapsed to one line; BN wraps it) so nothing reads as a fragment.
+        # blank lines between sections so multi-bug/precond functions stay scannable.
+        lines = ["[binaudit]  verdict: %s" % (reviews.get(name) or "reviewed")]
         for b in bugs.get(name, [])[:4]:
-            lines.append("bug: %s/%s — %s" % (b["bug_class"] or "?", b["status"] or "open", (b["desc"] or "")[:90]))
-        for p in preconds.get(name, [])[:3]:
-            lines.append("precond[%s/%s]: %s" % (p["kind"] or "?", p["klass"] or "?", (p["text"] or "")[:100]))
+            lines += ["", "BUG (%s, %s):" % (b["bug_class"] or "?", b["status"] or "open"), "  %s" % _trunc(b["desc"], 600)]
+        callers = preconds.get(name, [])[:4]
+        if callers:
+            lines.append("")
+            lines.append("CALLER-OWED PRECONDITIONS:")
+            for p in callers:
+                lines.append("  - [%s/%s] %s" % (p["kind"] or "?", p["klass"] or "?", _trunc(p["text"], 500)))
         for a in audits.get(name, [])[:2]:
-            lines.append("stage3: %s — %s" % (a["verdict"] or "?", (a["guest_path"] or "")[:90]))
+            lines += ["", "STAGE-3 (%s): %s" % (a["verdict"] or "?", _trunc(a["guest_path"], 500))]
         lines.append("[/binaudit]")
         items.append({"name": name, "comment": "\n".join(lines), "tag": tag_for(name)})
         if limit and len(items) >= limit:

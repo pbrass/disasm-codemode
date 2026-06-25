@@ -3,6 +3,14 @@
 All notable changes to disasm-codemode. Versioning is semantic (MAJOR.MINOR.PATCH); pre-1.0,
 minor versions may add features and refine interfaces.
 
+## 0.7.1 — 2026-06-25
+
+### `bn-audit-sync` readability
+Comments were truncating fields mid-word (hard 90-char cut) so nothing read as a complete thought. Now each
+bug/precondition/stage-3 entry carries the **full text** (collapsed to one wrapped line, generous cap with a
+word-boundary `…`), under clear `BUG (...)` / `CALLER-OWED PRECONDITIONS` / `STAGE-3 (...)` sections with blank
+lines between. Reads like a proper analyst annotation in the disassembler.
+
 ## 0.7.0 — 2026-06-25
 
 ### Rename: `kernel-audit` → `binary-audit`

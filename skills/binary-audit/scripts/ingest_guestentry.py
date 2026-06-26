@@ -20,7 +20,8 @@ for r in recs:
     cands=sorted([f for f in allfns if f and f in tgt], key=len, reverse=True)
     c=tgt if tgt in allfns else (cands[0] if cands else tgt)
     v=r.get('verdict','needs-live-poc'); st=MAP.get(v,'candidate-needs-poc'); tally[v]=tally.get(v,0)+1
-    ev=f"[DEEP-DIVE {v}] {r.get('oob_primitive','')} | impact: {r.get('impact','')} | {r.get('evidence','')}"
+    prim = r.get('unsafe_primitive') or r.get('oob_primitive') or ''
+    ev=f"[DEEP-DIVE {v}] {prim} | impact: {r.get('impact','')} | {r.get('evidence','')}"
     cur.execute("INSERT INTO audit(func_name,verdict,evidence,guest_path,residual,next,confidence) VALUES(?,?,?,?,?,?,?)",
       (c, 'deepdive-'+v, ev[:8000], (r.get('guest_input') or '')[:8000], (r.get('external_blocker') or '')[:2000], '', r.get('confidence','')))
     cur.execute("UPDATE bug SET status=? WHERE func_name=?", (st,c))

@@ -1,11 +1,12 @@
 ---
 name: binary-audit
 description: >
-  (formerly kernel-audit.) Rank the functions of a large symbol-rich binary by memory-safety bug-likelihood
-  (reachability × cyclomatic complexity × memory-arithmetic × sink/parser signature), then drive a
+  (formerly kernel-audit.) Rank the functions of a large symbol-rich binary by guest-reachable memory
+  corruption/disclosure and v2 race/lifetime bug-likelihood
+  (reachability × cyclomatic complexity × memory-arithmetic × sink/parser/state signature), then drive a
   function-by-function CONTRACT-INFERENCE review that records a queryable PRECONDITION LEDGER — which
   becomes the worklist for caller-side violation hunting. Use when auditing a kernel / hypervisor / driver /
-  large C binary for guest→host or remote memory-corruption bugs and you need to spend review time where it
+  large C binary for guest→host or remote corruption/disclosure/race/lifetime bugs and you need to spend review time where it
   pays off and keep a durable record of every function's safety contract. Then LIVE-VALIDATE candidates on a
   reachability/exploitability ladder — most static OOB looseness is runtime-guarded (copy-then-use,
   masked-input, state-invariant), and recent escapes are int-overflow/double-fetch/UAF/uninit, not loose
@@ -53,12 +54,62 @@ python3 scripts/ingest.py <workflow-output.json>      # -> review/precondition/b
 # then Stage 3 (prep_phase2 -> Workflow -> ingest_phase2), the decider loop (prep_deciders…), and Stage 4 live-validation.
 ```
 
+### Stripped binary / recovered-BNDB quickstart
+When the useful symbols live in a Binary Ninja `.bndb` rather than the ELF symbol table, use the BN-backed
+path. Keep the target open in Binary Ninja and point `KAUDIT_BVMATCH` at the tab name; this avoids `objdump`
+address/rebase mistakes and captures recovered names, function ranges, and direct call edges.
+```bash
+export KAUDIT_BIN=/abs/path/target
+export KAUDIT_ROOT=/abs/path/audit-root
+export KAUDIT_BVMATCH=<open-binary-ninja-tab-substring>
+export KAUDIT_PROFILE=/abs/path/profile.json
+mkdir -p "$KAUDIT_ROOT"/hlil "$KAUDIT_ROOT"/asm
+bn-audit-extract-bn --bv-match "$KAUDIT_BVMATCH" --db "$KAUDIT_ROOT/kreview.db" --profile "$KAUDIT_PROFILE"
+python3 scripts/score.py "$KAUDIT_ROOT/kreview.db" "$KAUDIT_PROFILE"
+bn-audit-make-batches --db "$KAUDIT_ROOT/kreview.db" --out "$KAUDIT_ROOT/batches.json" --batch-size 25 --limit 250
+bn-audit-prep-batch-bn 1 --bv-match "$KAUDIT_BVMATCH" --root "$KAUDIT_ROOT" --profile "$KAUDIT_PROFILE"
+# run the generated review workflow / fanout, save JSON, then:
+python3 scripts/ingest.py "$KAUDIT_ROOT/reviews/batch01.combined.json"
+bn-audit-make-phase2 --db "$KAUDIT_ROOT/kreview.db" --batch-size 8
+bn-audit-prep-phase2-bn 1 --bv-match "$KAUDIT_BVMATCH" --root "$KAUDIT_ROOT"
+bn-audit-prep-deciders-bn 1 --bv-match "$KAUDIT_BVMATCH" --root "$KAUDIT_ROOT"   # for uncertain/partial phase-2 frontiers
+```
+The BN extractor adds `func_meta` and `audit_text` helper tables in addition to the normal ledger tables.
+`func_meta` records whether a name is still auto-generated and the observed caller/callee counts; `audit_text`
+caches HLIL/asm by address so batches can be regenerated without re-decompiling everything.
+For ad-hoc decider work after an `uncertain`, use:
+```bash
+bn-audit-prep-functions-bn --bv-match "$KAUDIT_BVMATCH" --root "$KAUDIT_ROOT" FuncA FuncB --addr 0x1234
+```
+It resolves names/addresses through `kreview.db`, extracts text from the open BNDB, and writes a manifest at
+`$KAUDIT_ROOT/followup-functions.json` (or `--out ...`).
+For indirect-dispatch gaps, first ask BN for data refs to the handler, then dump the table and pull the
+dispatcher/producer functions:
+```bash
+bn-xrefs --bv-match "$KAUDIT_BVMATCH" HandlerName --data
+bn-audit-dump-table-bn --bv-match "$KAUDIT_BVMATCH" --addr 0x17c9e60 --count 64 \
+  --stride 16 --ptr-off 0 --flag-off 8 --out "$KAUDIT_ROOT/dispatch-table.json"
+bn-audit-prep-functions-bn --bv-match "$KAUDIT_BVMATCH" --root "$KAUDIT_ROOT" Dispatcher ProducerFn HandlerName
+```
+Then verify both sides: the dispatcher must prove how the table index is selected, and the producer must prove
+whether the handler's parsed fields are clamped before the shared command buffer is dispatched.
+
 ## Pipeline & interface
 ```
 scripts/extract.py  <binary> <db> [profile.json]   # ~25s: capstone metrics + resolved call graph -> sqlite
+scripts/extract_bn.py --bv-match <tab> --db <db> --profile <profile.json>
 scripts/score.py    <db>        [profile.json]      # reachability gate + BugScore; writes back; prints top-40 + anchors
+scripts/graph_report.py --db <db> --out graph-locality.json --md graph-locality.md
+                                                        # address/callgraph locality report for stripped/recovered targets
+scripts/make_graph_batches.py --db <db> --graph graph-locality.json --out graph-batches.json
+                                                        # graph/locality-guided batches over high-score auto-name residue
 # review (pick one):
 scripts/prep_batch.py N   +   Workflow(scripts/review-wf-bN.js)   # parallel: 1 subagent/function -> structured records
+scripts/prep_batch_bn.py N --bv-match <tab>                       # same, but address-safe for recovered BNDBs
+scripts/prep_batch_bn.py N --batches graph-batches.json --graph-context graph-locality.json \
+                           --workflow-out review-wf-graph-bN.js   # graph-guided unnamed batch with locality context
+scripts/prep_functions_bn.py --bv-match <tab> FuncA --addr 0x...  # arbitrary follow-up/decider extraction
+scripts/validate_reviews.py <combined.json> --workflow review-wf-bN.js  # pre-ingest schema/taxonomy/coverage gate
 scripts/ingest.py   <workflow-output.json>          # load records into the ledger (review/precondition/bug tables)
 ```
 Outputs in `<db>`: `func` (metrics + `reach`/`dist`/`score`), `edge` (call graph), `review`, `precondition`,
@@ -105,6 +156,18 @@ For each ranked function (call-tree order from the roots — a hot root pulls in
 The parallel implementation (`review-wf*.js`) fans out one subagent per function (reads pre-extracted
 `hlil/<fn>.hlil.c` + `asm/<fn>.asm`), returning a schema-validated record. Solo works too — same loop.
 
+**Combine gate before ingest.** Do not load raw fanout blindly. First run
+`bn-audit-validate-reviews "$KAUDIT_ROOT/reviews/batchNN.combined.json" --workflow "$KAUDIT_ROOT/review-wf-bN.js"`
+and review the warnings:
+- assigned-vs-returned must match; missing functions are queued for solo rerun, not silently skipped.
+- taxonomy must be normalized to the schema enums (`kind`, `klass`, `confidence`, `bug_class`); ad-hoc labels
+  from agents are edited before ingest.
+- promote a `suspected_bugs` entry only when it has a concrete unsafe memory operation, an HLIL/ASM anchor, and
+  a plausible attacker-controlled violation. Weak callee-contract or restore-parser speculation should remain
+  a `caller`/`unguaranteed` precondition with `needs-caller-analysis`, not an open bug.
+- default low-confidence leads to preconditions unless broad triage is explicitly desired. Medium/high suspected
+  bugs should name the exact next invariant Stage 3 must prove or refute.
+
 ### Stage 3 — attack the contract (the phase-2 audit, tooled)
 Phase-1 records what each function *assumes*; Stage 3 decides whether each caller-owed assumption is actually
 **established** (safe) or **violable** (a real bug) by tracing the upstream callers. This is a distinct,
@@ -127,10 +190,14 @@ chain that delivers attacker input (e.g. whether a guest can hold the socket fd 
 trace *who registers/invokes the entry handler* before claiming guest→host, or you'll over- or under-rate severity.
 ```
 scripts/prep_phase2.py N         # for phase2-batches.json[N-1]: per bug fn, pull its caller-owed preconditions
+scripts/prep_phase2_bn.py N      # same, but extracts consumer/caller text from the open BNDB by address
                               # + its callers (lynchpins) from the edge table, extract HLIL+asm, emit phase2-wf-bN.js
 Workflow(scripts/phase2-wf-bN.js)# 1 subagent/bug: read consumer + lynchpin callers -> trace the bound
 scripts/ingest_phase2.py <out>   # verdicts -> `audit` table + bug.status / precondition.status
 ```
+Build `phase2-batches.json` with `scripts/make_phase2_batches.py` / `bn-audit-make-phase2`. Default batches
+open suspected bugs; add `--include-preconditions` when you want the broader caller-owned contract surface even
+for functions that Stage 2 did not label as a suspected bug.
 Each task bundles the **consumer** (the flagged fn — exactly what bound must hold) with its **lynchpin
 callers** (which must establish it). Verdict taxonomy (the key discipline): **established-safe** (bound IS
 enforced upstream → `refuted`), **violable-bug** (NOT enforced, guest can break it → `confirmed-violable`),
@@ -143,11 +210,37 @@ SELECT func_name,verdict,evidence,guest_path FROM audit WHERE verdict='violable-
 Every `violable-bug` → **verify against the shipped binary before claiming it** (the verify-before-claim rule).
 Iterate the audit batch-by-batch until every suspected bug is adjudicated.
 
+### Graph/locality steering for stripped targets
+For recovered-name BNDBs, run `bn-audit-graph-report` after extraction/scoring and whenever a broad review pass
+falls below the yield threshold:
+```bash
+bn-audit-graph-report --db "$KAUDIT_ROOT/kreview.db" \
+  --out "$KAUDIT_ROOT/graph-locality.json" --md "$KAUDIT_ROOT/graph-locality.md"
+bn-audit-make-graph-batches --db "$KAUDIT_ROOT/kreview.db" \
+  --graph "$KAUDIT_ROOT/graph-locality.json" --out "$KAUDIT_ROOT/graph-batches.json" \
+  --vmx-keywords --min-score 1.0 --limit 48
+bn-audit-prep-batch-bn 1 --bv-match "$KAUDIT_BVMATCH" --root "$KAUDIT_ROOT" \
+  --batches "$KAUDIT_ROOT/graph-batches.json" --graph-context "$KAUDIT_ROOT/graph-locality.json" \
+  --workflow-out "$KAUDIT_ROOT/review-wf-graph-b1.js"
+```
+The report highlights:
+- address-contiguous auto-name runs bounded by nearest named lower/higher functions;
+- prefix-sandwiched functions where both sides or the local window agree on a family prefix;
+- unnamed direct-call components with named boundary callers/callees and dominant boundary prefixes.
+Use it in two ways. For **symbol recovery**, feed high-signal runs back into `symbolicate`'s
+`bn-sym-prep-locality` rather than continuing the same exhausted second-pass queue. For **bug hunting**, treat
+high-score unnamed runs/components near device, checkpoint, migration, VMCI/vsock, USB, storage, graphics, or RPC
+families as audit expansion targets, especially when they contain sink/parser-heavy functions or sit on the
+callgraph boundary of a confirmed candidate. Prefix agreement is evidence, not proof: reviewers should still
+check the HLIL and direct callers/callees before accepting a name or claiming a reachable bug.
+
 **Driving `uncertain` to a fixpoint — the decider loop.** An `uncertain` names the next function *up* the
 chain, so resolution is iterative-deepening: `scripts/prep_deciders.py N` bootstraps a frontier from every
 `uncertain`/`partial` verdict's named decider, `Workflow(decider-wf-bN.js)` audits that frontier, and
 `scripts/ingest_deciders.py` either resolves the bug or pushes the chain one function higher (depth-capped,
-cycle-guarded) — loop N=1,2,… until the frontier is empty (**fixpoint**). The decider verdict is sharpened to
+cycle-guarded) — loop N=1,2,… until the frontier is empty (**fixpoint**). For stripped/recovered-BNDB targets,
+use `scripts/prep_deciders_bn.py N` / `bn-audit-prep-deciders-bn` instead; it extracts consumer and decider
+text from the open BNDB and keeps the workflow address-safe. The decider verdict is sharpened to
 **six** outcomes so a stalled chain is never lumped into one "unknown" bucket — the three terminal stalls mean
 very different things:
 - `established-safe`→refuted · `violable-bug`→confirmed-violable · `partial`.
@@ -185,7 +278,7 @@ ground-truth defect. (tcpip4: prior findings F2/F3/F5 as anchors; vmci: no prior
   adjudication trail.
 
 **v2 columns (analysis-type aware — added for the Stage-4 lens):**
-- `bug.bug_class` ∈ {`oob`, `int-overflow`, `double-fetch`, `uaf-lifetime`, `uninit-disclosure`, `race`} —
+- `bug.bug_class` ∈ {`oob`, `int-overflow`, `double-fetch`, `uaf-lifetime`, `uninit-disclosure`, `race`, `type-confusion`, `other`} —
   the exploited-class taxonomy; slice the ledger by class, e.g.
   `SELECT func_name,status FROM bug WHERE bug_class='double-fetch'`.
 - `audit.guard` — the EXACT defusing check (+address) recorded on a `refuted`/`confirmed-latent` verdict
@@ -269,6 +362,19 @@ Validated on a 252-function review + a 28-bug phase-2 audit, all via background 
 - **Restart-survivable by construction**: all state is on disk (`kreview.db`, `batches.json` /
   `phase2-batches.json`, the `*-progress.md` trackers); the `review-wf-bN.js` are regenerable. Resume = read
   the progress tracker, `prep_*` the next batch, relaunch.
+- **For stripped/recovered binaries, stay address-based after extraction**: use `extract_bn.py`,
+  `make_batches.py`, `prep_batch_bn.py`, `prep_functions_bn.py`, `make_phase2_batches.py`, and
+  `prep_phase2_bn.py` / `prep_deciders_bn.py`. For indirect dispatch, use `bn-xrefs --data` plus
+  `dump_table_bn.py` / `bn-audit-dump-table-bn` to recover handler tables before deciding reachability.
+  Avoid mixing a rebased BNDB address with
+  `objdump --start-address` from the raw ELF unless you have verified the image base.
+- **Stage-2 ingest is replace-by-function by default**: re-ingesting an improved review deletes that function's
+  previous Stage-2 preconditions/bugs before inserting the new set. Use `ingest.py --append` only for intentional
+  multi-pass comparison.
+- **Pre-ingest validation is a save-point check**: `validate_reviews.py` / `bn-audit-validate-reviews` catches
+  missing fanout results, duplicate records, invalid taxonomy, unanchored suspected bugs, and low-confidence bugs
+  that should usually be carried as preconditions. Run it before every `ingest.py` call and keep the clean
+  combined JSON in `reviews/`.
 - **Honesty guardrails in the prompt pay off**: "default to `uncertain`, name the next function, this is
   contract verification not exploit-dev" produced calibrated verdicts (clean/needs-caller-analysis dominate;
   bugs are flagged with confidence + caller-audit targets, not fabricated).

@@ -5,7 +5,20 @@ uncertain->append the named next decider (depth-capped, cycle-guarded). Fixpoint
 import sys, json, sqlite3, re, os
 import os
 ROOT=os.environ.get("KAUDIT_ROOT","."); WL=f"{ROOT}/decider-worklist.json"; MAXDEPTH=5
-recs=json.loads(re.search(r'\[\s*\{.*\}\s*\]',open(sys.argv[1]).read(),re.S).group(0))
+raw=open(sys.argv[1]).read()
+recs=None
+try:
+    recs=json.loads(raw)
+except Exception:
+    pass
+if isinstance(recs,dict):
+    recs=[recs]
+if not isinstance(recs,list):
+    m=re.search(r'\[\s*\{.*\}\s*\]',raw,re.S)
+    if m:
+        recs=json.loads(m.group(0))
+if not isinstance(recs,list):
+    print("could not parse decider verdict array/object"); sys.exit(1)
 wl=json.load(open(WL)); con=sqlite3.connect(f"{ROOT}/kreview.db"); cur=con.cursor()
 cur.execute("CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY, func_name TEXT, verdict TEXT, evidence TEXT, guest_path TEXT, residual TEXT, next TEXT, confidence TEXT, guard TEXT)")
 try: cur.execute("ALTER TABLE audit ADD COLUMN guard TEXT")
@@ -23,6 +36,11 @@ def find_sym(text):
     for s in SYMSL:
         if len(s)>6 and s in text: return s
     return None
+def text(v,limit=None):
+    if v is None: s=''
+    elif isinstance(v,(list,dict)): s=json.dumps(v,indent=2)
+    else: s=str(v)
+    return s[:limit] if limit else s
 def pair(c,d): return next((p for p in wl["frontier"] if p["consumer"]==c and p["decider"]==d), None)
 tally={}
 for r in recs:
@@ -38,12 +56,12 @@ for r in recs:
     if p: p["status"]="done"; p["verdict"]=v
     wl.setdefault("audited",{})[d]=v
     cur.execute("INSERT INTO audit(func_name,verdict,evidence,guest_path,residual,next,confidence) VALUES(?,?,?,?,?,?,?)",
-      (d,v,(r.get('evidence') or '')[:8000]+f"  [decides {c}]",(r.get('guest_reachable_path') or '')[:8000],(r.get('residual_unknowns') or '')[:2000],(r.get('recommended_next') or '')[:1000],r.get('confidence','')))
+      (d,v,text(r.get('evidence'),8000)+f"  [decides {c}]",text(r.get('guest_reachable_path'),8000),text(r.get('residual_unknowns'),2000),text(r.get('recommended_next'),1000),text(r.get('confidence',''))))
     newstatus=None
     if v in TERM:
         newstatus=TERM[v]
     elif v=='uncertain-continue':
-        d2=find_sym(r.get('recommended_next',''))
+        d2=find_sym(text(r.get('recommended_next','')))
         chain_decs={pp["decider"] for pp in wl["frontier"] if pp["consumer"]==c}
         if not d2 or d2 not in SYMS or d2==c:                newstatus='exhausted-extsym'   # external symbol
         elif d2 in chain_decs or d2 in wl.get('audited',{}): newstatus='exhausted-cycle'
@@ -51,9 +69,12 @@ for r in recs:
         else:
             b=cur.execute("SELECT desc FROM bug WHERE func_name=? LIMIT 1",(c,)).fetchone()
             wl["frontier"].append({"consumer":c,"decider":d2,"bug_desc":(b[0] if b else c)[:2000],
-                "precondition":(r.get('recommended_next') or '')[:1000],"status":"pending","depth":depth+1})
+                "precondition":text(r.get('recommended_next'),1000),"status":"pending","depth":depth+1})
     if newstatus:
         cur.execute("UPDATE bug SET status=? WHERE func_name=? AND status NOT IN ('confirmed-violable')", (newstatus,c))
+        cur.execute("DELETE FROM audit WHERE func_name=?", (c,))
+        cur.execute("INSERT INTO audit(func_name,verdict,evidence,guest_path,residual,next,confidence) VALUES(?,?,?,?,?,?,?)",
+          (c,v,text(r.get('evidence'),8000)+f"  [resolved via {d}]",text(r.get('guest_reachable_path'),8000),text(r.get('residual_unknowns'),2000),text(r.get('recommended_next'),1000),text(r.get('confidence',''))))
 con.commit(); json.dump(wl,open(WL,'w'),indent=0)
 pend=sum(1 for p in wl["frontier"] if p["status"]=="pending")
 print(f"ingested {len(recs)} decider verdicts:", tally)

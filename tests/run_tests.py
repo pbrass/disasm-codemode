@@ -16,6 +16,7 @@ INSPECT = os.path.join(ROOT, "skills", "bn-inspect", "scripts")
 HUNT = os.path.join(ROOT, "skills", "bn-hunt", "scripts")
 BNJA = os.path.join(ROOT, "skills", "binary-ninja", "scripts")
 GHIDRA = os.path.join(ROOT, "skills", "ghidra", "scripts")
+SYMBOLICATE = os.path.join(ROOT, "skills", "symbolicate", "scripts")
 PY = sys.executable
 MCP_URL = os.environ.get("BINJA_MCP_URL", "http://127.0.0.1:42069").rstrip("/")
 MCP_KEY = os.environ.get("BINJA_MCP_KEY", "binja-codemode-local")
@@ -404,6 +405,15 @@ def test_packaging():
                 "bn-frame", "bn-disasm-range", "bn-scan", "bn-cap-scan", "bn-symdiff",
                 "bn-bulk-decompile", "bn-open", "bn-status", "bn-exec", "bn-audit-sync",
                 "bn-re-apply", "bn-re-vars",
+                "bn-audit-dump-table-bn", "bn-audit-extract-bn", "bn-audit-graph-report",
+                "bn-audit-make-batches", "bn-audit-make-graph-batches", "bn-audit-make-phase2",
+                "bn-audit-prep-batch-bn", "bn-audit-prep-deciders-bn",
+                "bn-audit-prep-functions-bn", "bn-audit-prep-phase2-bn",
+                "bn-audit-validate-reviews",
+                "bn-sym-extract", "bn-sym-determ", "bn-sym-prep", "bn-sym-makewf",
+                "bn-sym-ingest", "bn-sym-combine", "bn-sym-prep-locality",
+                "bn-sym-prep-second", "bn-sym-review-protos", "bn-sym-slice-protos",
+                "bn-sym-split",
                 "gh-decompile", "gh-find", "gh-xrefs", "gh-strxref", "gh-scansec", "gh-callsites",
                 "gh-frame", "gh-disasm-range", "gh-scan", "gh-exec", "gh-status"]
     have = set(os.listdir(BIN)) if os.path.isdir(BIN) else set()
@@ -426,6 +436,15 @@ def test_packaging():
     uassert("bn-inspect SKILL uses bn-* commands", all(c in si for c in ("bn-decompile", "bn-find", "bn-xrefs", "bn-strxref", "bn-scansec")))
     uassert("bn-hunt SKILL uses bn-* commands", all(c in shh for c in ("bn-callsites", "bn-frame", "bn-disasm-range")))
     uassert("no stale bnopen.sh reference in bn-inspect SKILL", "bnopen.sh" not in si)
+    # symbolicate skill: core scripts + newer fanout/prototype helpers
+    sym_skill = os.path.join(ROOT, "skills", "symbolicate", "SKILL.md")
+    sym_files = ["extract.py", "determ.py", "prep_batch.py", "make_wf.py", "ingest.py",
+                 "split_batch.py", "combine_outputs.py", "prep_locality_pass.py",
+                 "prep_second_pass.py", "review_protos.py", "slice_protos.py"]
+    uassert("symbolicate SKILL present", os.path.exists(sym_skill) and "name: symbolicate" in open(sym_skill).read())
+    uassert("symbolicate scripts present", all(os.path.exists(os.path.join(SYMBOLICATE, f)) for f in sym_files),
+            "missing: %s" % [f for f in sym_files if not os.path.exists(os.path.join(SYMBOLICATE, f))])
+    uassert("symbolicate profile present", os.path.exists(os.path.join(ROOT, "skills", "symbolicate", "profiles", "vmware.json")))
     # ghidra skill: SKILL.md, scripts, reference guide
     gs = open(os.path.join(ROOT, "skills", "ghidra", "SKILL.md")).read()
     uassert("ghidra SKILL uses gh-* commands", all(c in gs for c in (
@@ -842,6 +861,120 @@ def unit_binary_audit():
     finally:
         shutil.rmtree(td2, ignore_errors=True)
 
+    # phase2 target resolution: exact names must win over shorter substring names
+    print("## binary-audit: phase2 exact target matching (no MCP)")
+    td3 = tempfile.mkdtemp(prefix="ba_p2_")
+    try:
+        dbp = os.path.join(td3, "kreview.db")
+        cx = sqlite3.connect(dbp)
+        cx.executescript(
+            "CREATE TABLE func(addr INTEGER, name TEXT, score REAL);"
+            "CREATE TABLE bug(func_name TEXT, status TEXT);"
+            "CREATE TABLE precondition(func_name TEXT, klass TEXT, status TEXT);")
+        cx.execute("INSERT INTO func VALUES(?,?,?)", (0x1000, "Snapshot_Load", 1.0))
+        cx.execute("INSERT INTO func VALUES(?,?,?)", (0x2000, "Snapshot_LoadConfig_2", 2.0))
+        cx.execute("INSERT INTO precondition VALUES(?,?,?)", ("Snapshot_Load", "caller", "open"))
+        cx.execute("INSERT INTO precondition VALUES(?,?,?)", ("Snapshot_LoadConfig_2", "caller", "open"))
+        cx.commit(); cx.close()
+        outp = os.path.join(td3, "phase2.json")
+        open(outp, "w").write(json.dumps({"target": "Snapshot_LoadConfig_2", "verdict": "partial", "confidence": "med"}))
+        env = dict(os.environ, KAUDIT_ROOT=td3)
+        p = subprocess.run([PY, os.path.join(BA_SCRIPTS, "ingest_phase2.py"), outp],
+                           capture_output=True, text=True, env=env, timeout=60)
+        cx = sqlite3.connect(dbp)
+        rows = dict(cx.execute("SELECT func_name,status FROM precondition"))
+        audit = cx.execute("SELECT func_name,verdict FROM audit").fetchone()
+        cx.close()
+        uassert("phase2 ingest exact-match runs", p.returncode == 0 and "Traceback" not in (p.stdout + p.stderr), (p.stdout + p.stderr)[:300])
+        uassert("phase2 exact target matched long name", audit == ("Snapshot_LoadConfig_2", "partial"), "audit=%r" % (audit,))
+        uassert("phase2 shorter substring left open", rows.get("Snapshot_Load") == "open", "rows=%r" % rows)
+        uassert("phase2 exact precondition updated", rows.get("Snapshot_LoadConfig_2") == "partial", "rows=%r" % rows)
+    except Exception as e:
+        bad("phase2 exact matching run", repr(e))
+    finally:
+        shutil.rmtree(td3, ignore_errors=True)
+
+
+def unit_symbolicate():
+    """No MCP: deterministic naming, workflow generation, split/combine, and sidecar ingest."""
+    print("\n## symbolicate: sidecar + fanout helpers (no MCP)")
+    import tempfile, shutil, sqlite3
+    td = tempfile.mkdtemp(prefix="sym_unit_")
+    try:
+        dbp = os.path.join(td, "symdb.sqlite")
+        cx = sqlite3.connect(dbp)
+        cx.executescript(
+            "CREATE TABLE func(addr INTEGER PRIMARY KEY, name TEXT);"
+            "CREATE TABLE strref(func_addr INTEGER, s TEXT, pfx TEXT, is_logpfx INTEGER);"
+            "CREATE TABLE domain(func_addr INTEGER, tag TEXT);"
+            "CREATE TABLE edge(caller INTEGER, callee INTEGER, callee_name TEXT);")
+        cx.execute("INSERT INTO func VALUES(?,?)", (0x1000, "sub_1000"))
+        cx.execute("INSERT INTO func VALUES(?,?)", (0x2000, "AlreadyNamed"))
+        cx.execute("INSERT INTO func VALUES(?,?)", (0x3000, "sub_3000"))
+        cx.execute("INSERT INTO strref VALUES(?,?,?,?)", (0x1000, "Vmxnet3_InitQueues: ready", "Vmxnet3_InitQueues", 1))
+        cx.execute("INSERT INTO strref VALUES(?,?,?,?)", (0x3000, "SharedPrefix: a", "SharedPrefix", 1))
+        cx.execute("INSERT INTO strref VALUES(?,?,?,?)", (0x2000, "SharedPrefix: b", "SharedPrefix", 1))
+        cx.execute("INSERT INTO domain VALUES(?,?)", (0x1000, "Vmxnet3"))
+        cx.commit(); cx.close()
+        side = os.path.join(td, "sidecar.json")
+        prof = os.path.join(ROOT, "skills", "symbolicate", "profiles", "vmware.json")
+        p = subprocess.run([PY, os.path.join(SYMBOLICATE, "determ.py"),
+                            "--db", dbp, "--sidecar", side, "--profile", prof],
+                           capture_output=True, text=True, timeout=60)
+        data = json.load(open(side))
+        rec = data.get("functions", {}).get("0x1000", {})
+        uassert("sym determ runs", p.returncode == 0 and "Traceback" not in (p.stdout + p.stderr), (p.stdout + p.stderr)[:300])
+        uassert("sym determ names exact log prefix", rec.get("name") == "Vmxnet3_InitQueues", "rec=%r" % rec)
+        uassert("sym determ annotates provenance", rec.get("_source") == "determ-logstring" and rec.get("_confidence") == "high")
+        uassert("sym determ ignores shared prefix", "0x3000" not in data.get("functions", {}), json.dumps(data, sort_keys=True)[:300])
+
+        wf_batch = os.path.join(td, "batch.json")
+        wf_out = os.path.join(td, "batch.wf.js")
+        batch = [
+            {"addr": "0x1000", "tier": "haiku", "strings": ["Vmxnet3_InitQueues: ready"], "named_callees": [], "named_callers": [], "domain": ["Vmxnet3"], "hlil": "return 0"},
+            {"addr": "0x3000", "tier": "sonnet", "strings": ["thin"], "named_callees": [], "named_callers": [], "domain": [], "hlil": "return 1"},
+        ]
+        open(wf_batch, "w").write(json.dumps(batch))
+        p2 = subprocess.run([PY, os.path.join(SYMBOLICATE, "make_wf.py"), wf_batch, "--out", wf_out],
+                            capture_output=True, text=True, timeout=60)
+        wft = open(wf_out).read()
+        uassert("sym make_wf runs", p2.returncode == 0 and "symbolicate-name" in wft and "0x1000" in wft, (p2.stdout + p2.stderr)[:300])
+
+        chunks = os.path.join(td, "chunks")
+        results = os.path.join(td, "results")
+        os.mkdir(results)
+        p3 = subprocess.run([PY, os.path.join(SYMBOLICATE, "split_batch.py"), wf_batch, "--out-dir", chunks, "--haiku-size", "1", "--sonnet-size", "1"],
+                            capture_output=True, text=True, timeout=60)
+        chunk_files = sorted(os.path.join(chunks, f) for f in os.listdir(chunks) if f.endswith(".json"))
+        uassert("sym split runs", p3.returncode == 0 and len(chunk_files) == 2, "chunks=%r out=%s" % (chunk_files, p3.stdout))
+        for cf in chunk_files:
+            src = json.load(open(cf))
+            out = []
+            for item in src:
+                if item["addr"] == "0x3000":
+                    out.append({"addr": item["addr"], "tier": "wrong-tier", "name": "", "confidence": "none", "comment": "abstain", "proto": "int bad(void);"})
+                else:
+                    out.append({"addr": item["addr"], "tier": item["tier"], "name": "Vmxnet3_InitQueues", "confidence": "high", "comment": "queue init", "proto": "int Vmxnet3_InitQueues(void);"})
+            open(os.path.join(results, os.path.basename(cf).replace(".json", ".out.json")), "w").write(json.dumps(out))
+        combined = os.path.join(td, "combined.json")
+        p4 = subprocess.run([PY, os.path.join(SYMBOLICATE, "combine_outputs.py"),
+                             "--chunks", chunks, "--results", results, "--out", combined, "--strict"],
+                            capture_output=True, text=True, timeout=60)
+        comb = json.load(open(combined))
+        abst = [r for r in comb if r["addr"] == "0x3000"][0]
+        uassert("sym combine runs strict", p4.returncode == 0 and len(comb) == 2, (p4.stdout + p4.stderr)[:500])
+        uassert("sym combine clears abstention fields", abst["confidence"] == "none" and not abst["name"] and not abst["proto"], "abst=%r" % abst)
+
+        p5 = subprocess.run([PY, os.path.join(SYMBOLICATE, "ingest.py"), combined, "--sidecar", side],
+                            capture_output=True, text=True, timeout=60)
+        merged = json.load(open(side))
+        uassert("sym ingest runs", p5.returncode == 0 and "Traceback" not in (p5.stdout + p5.stderr), (p5.stdout + p5.stderr)[:300])
+        uassert("sym ingest preserves high-confidence name", merged["functions"]["0x1000"]["name"] == "Vmxnet3_InitQueues")
+    except Exception as e:
+        bad("symbolicate unit run", repr(e))
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
 
 def test_binary_audit_live():
     """MCP: bn-audit-sync --file --save writes the comment+tag and PERSISTS it; reload proves full text survived."""
@@ -947,6 +1080,7 @@ def main():
     test_packaging()            # always (manifests, bin wrappers, structure, bn-scan arg-validation)
     test_security()             # tainted-output handling (unit always; evil-binary integration needs caps/MCP)
     unit_binary_audit()         # always (no BN): ledger->comment builder + ingest caps
+    unit_symbolicate()          # always (no BN): sidecar naming + split/combine/ingest helpers
     have_caps = True
     try:
         import capstone, elftools  # noqa

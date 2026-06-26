@@ -1,6 +1,6 @@
 export const meta = {
   name: 'kernel-phase2-audit',
-  description: 'Phase-2 contract audit: trace upstream lynchpins to decide if each suspected bug is established-safe or violable',
+  description: 'Phase-2 contract audit: trace upstream lynchpins to decide if each suspected corruption/disclosure/race/lifetime bug is established-safe or violable',
   phases: [{ title: 'Audit', detail: 'one subagent per suspected bug -> established-safe | violable-bug | uncertain' }],
 }
 
@@ -36,12 +36,12 @@ LYNCHPIN CALLER(S) — the upstream that must establish the precondition:
 ${t.lynchpins.length? t.lynchpins.map(x=>`  - ${x.name}: HLIL ${x.hlil} | ASM ${x.asm}`).join('\n') : '  (no direct callers extracted — say uncertain and name the entry point to pull)'}
 
 METHOD:
-1. In the consumer, pin down EXACTLY the value/bound that must hold (offset/length/index and the buffer/array it must fit) and confirm it is genuinely guest-influenced (not a hardware-fixed constant).
-2. In the caller(s), find where that value is produced/validated: clamped/checked, derived from a fixed constant, or passed through from guest bytes unmodified?
+1. In the consumer, pin down EXACTLY the precondition that must hold: offset/length/index and backing object for bounds bugs; single-fetch/copy-to-local for TOCTOU; ref/lock/lifetime discipline for UAF/race; initialization coverage for disclosure; or type discriminator/object layout for type confusion. Confirm it is genuinely guest-influenced or guest-triggerable, not a hardware-fixed constant.
+2. In the caller(s), find where that value/state is produced/validated: clamped/checked, copied to a stable host local, ref-held/locked, initialized, type-checked, derived from a fixed constant, or passed through from guest bytes/state unmodified?
 3. Verdict: established-safe / violable-bug / partial / uncertain. If the establishing check lives ABOVE the provided callers, say 'uncertain' and NAME the next function to pull — do NOT assume safe.
 4. If violable-bug: state the concrete guest input and the path that breaks the precondition.
 
-RULES: rigorous and HONEST — default for an unproven bound is 'uncertain', not 'safe' and not 'bug'. Anchor evidence to HLIL lines / asm addrs. This is memory-safety contract verification, not exploit development.
+RULES: rigorous and HONEST — default for an unproven precondition is 'uncertain', not 'safe' and not 'bug'. Anchor evidence to HLIL lines / asm addrs. This is corruption/disclosure/race/lifetime contract verification, not exploit development.
 
 Return the structured verdict.`
 

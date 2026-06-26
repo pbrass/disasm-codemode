@@ -1,10 +1,20 @@
 #!/usr/bin/env python3
 """ingest.py <workflow-output.json>  -> load review records into kreview.db ledger.
-Tolerant of wrapper formats: finds the first JSON array of records in the file."""
-import sys, json, sqlite3, re
-import os
+Tolerant of wrapper formats: finds the first JSON array of records in the file.
+
+By default this is idempotent per reviewed function: an updated review replaces
+that function's previous Stage-2 preconditions/bugs instead of appending
+duplicates. Use --append only when intentionally preserving multiple passes.
+"""
+import argparse, datetime, json, os, re, sqlite3, sys
+
+ap=argparse.ArgumentParser(description="Load Stage-2 review records into kreview.db")
+ap.add_argument("workflow_output")
+ap.add_argument("--append", action="store_true", help="append preconditions/bugs instead of replacing records for reviewed functions")
+args=ap.parse_args()
+
 ROOT=os.environ.get("KAUDIT_ROOT",".")
-raw=open(sys.argv[1]).read()
+raw=open(args.workflow_output).read()
 # the workflow return value is an array of records; find it
 recs=None
 try: recs=json.loads(raw)
@@ -22,13 +32,21 @@ cur.execute("CREATE TABLE IF NOT EXISTS precondition(id INTEGER PRIMARY KEY, fun
 cur.execute("CREATE TABLE IF NOT EXISTS bug(id INTEGER PRIMARY KEY, func_addr INTEGER, func_name TEXT, desc TEXT, location TEXT, severity TEXT, confidence TEXT, why TEXT, status TEXT, bug_class TEXT)")
 try: cur.execute("ALTER TABLE bug ADD COLUMN bug_class TEXT")   # v2 taxonomy migration (idempotent)
 except Exception: pass
+today=datetime.date.today().isoformat()
 n_p=n_b=0
 for rec in recs:
     if not isinstance(rec,dict): continue
     nm=rec.get('function')
     a=cur.execute("SELECT addr FROM func WHERE name=?", (nm,)).fetchone()
     addr=a[0] if a else None
-    cur.execute("INSERT OR REPLACE INTO review VALUES(?,?,?,?,?,?)",(addr,nm,'2026-06-23','wf',rec.get('verdict'),(rec.get('summary') or '')[:4000]))
+    if not args.append:
+        if addr is not None:
+            cur.execute("DELETE FROM precondition WHERE func_addr=?", (addr,))
+            cur.execute("DELETE FROM bug WHERE func_addr=?", (addr,))
+        else:
+            cur.execute("DELETE FROM precondition WHERE func_name=?", (nm,))
+            cur.execute("DELETE FROM bug WHERE func_name=?", (nm,))
+    cur.execute("INSERT OR REPLACE INTO review VALUES(?,?,?,?,?,?)",(addr,nm,today,'wf',rec.get('verdict'),(rec.get('summary') or '')[:4000]))
     for p in rec.get('preconditions') or []:
         cur.execute("INSERT INTO precondition(func_addr,func_name,text,kind,klass,sink,status,attack_note) VALUES(?,?,?,?,?,?,?,?)",
           (addr,nm,p.get('text'),p.get('kind'),p.get('klass'),p.get('sink',''),'open',p.get('attack_note',''))); n_p+=1

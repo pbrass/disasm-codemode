@@ -3,6 +3,40 @@
 All notable changes to disasm-codemode. Versioning is semantic (MAJOR.MINOR.PATCH); pre-1.0,
 minor versions may add features and refine interfaces.
 
+## 0.9.0 — 2026-06-26
+
+### New: `symbolicate` — evidence-driven mass symbol recovery for stripped binaries
+Adds `skills/symbolicate/`, a repeatable workflow for recovering useful function names and role comments in
+large stripped or partially stripped binaries:
+- `bn-sym-extract` harvests function evidence from an open Binary Ninja database into sqlite: referenced
+  strings/log prefixes, call-neighborhoods, domain tags, and HLIL snippets.
+- `bn-sym-determ` applies deterministic high-confidence names from VMware-style log prefixes before any LLM
+  pass.
+- `bn-sym-prep` / `bn-sym-makewf` prepare tiered naming workflow batches; `bn-sym-split` /
+  `bn-sym-combine` support external fanout and strict result validation.
+- `bn-sym-ingest` merges recovered names, comments, and optional prototypes into the git-tracked
+  `bn-re-apply` sidecar.
+- Added second-pass/locality/prototype helpers: `bn-sym-prep-locality`, `bn-sym-prep-second`,
+  `bn-sym-review-protos`, `bn-sym-slice-protos`.
+
+### Binary-audit: BN-backed extraction and caller-loop workflow
+`binary-audit` can now operate when the useful function names live in a `.bndb` instead of the ELF symbol
+table:
+- New wrappers/scripts: `bn-audit-extract-bn`, `bn-audit-prep-batch-bn`, `bn-audit-prep-phase2-bn`,
+  `bn-audit-prep-deciders-bn`, `bn-audit-prep-functions-bn`, `bn-audit-make-batches`,
+  `bn-audit-make-phase2`, `bn-audit-make-graph-batches`, `bn-audit-graph-report`,
+  `bn-audit-dump-table-bn`, and `bn-audit-validate-reviews`.
+- Phase-2 batching can include open caller/unguaranteed preconditions, enabling broader caller-contract loops
+  beyond already-open suspected bugs.
+- `ingest_phase2.py` now resolves exact target names first and then uses the longest substring match, avoiding
+  collisions like `Snapshot_Load` vs `Snapshot_LoadConfig_2`.
+
+### Release hygiene
+- README and marketplace metadata now describe symbol recovery, binary-audit BN-backed workflows, and the new
+  command wrappers.
+- Tests now cover symbolicate's no-BN sidecar/fanout helpers and the phase-2 exact-target ingest regression,
+  in addition to existing wrapper/manifest checks and live MCP integration tests.
+
 ## 0.8.0 — 2026-06-25
 
 ### New: `bn-re-apply` / `bn-re-vars` — annotate in a git-tracked sidecar, sync into the bndb

@@ -2,15 +2,15 @@
   "name": "disasm-codemode",
   "owner": { "name": "Phil Brass", "url": "https://github.com/pbrass" },
   "metadata": {
-    "description": "Marketplace for the disasm-codemode plugin (drive a decompiler's code-mode MCP for RE / patch-diff / bug hunting).",
-    "version": "0.5.0"
+    "description": "Marketplace for the disasm-codemode plugin (drive a decompiler's code-mode MCP for RE / symbol recovery / patch-diff / bug hunting).",
+    "version": "0.9.0"
   },
   "plugins": [
     {
       "name": "disasm-codemode",
       "source": "./",
-      "description": "Drive a disassembler/decompiler headlessly via its code-mode MCP for reverse engineering, binary patch-diffing, and memory-safety bug-class scanning. Engines: Binary Ninja and Ghidra, plus a native toolkit (gore) for stripped Go binaries.",
-      "keywords": ["reverse-engineering", "binary-ninja", "ghidra", "vulnerability-research", "patch-diff", "golang"]
+      "description": "Drive a disassembler/decompiler headlessly via its code-mode MCP for reverse engineering, symbol recovery, binary patch-diffing, and memory-safety bug-class scanning. Engines: Binary Ninja and Ghidra, plus a native toolkit (gore) for stripped Go binaries.",
+      "keywords": ["reverse-engineering", "binary-ninja", "ghidra", "vulnerability-research", "patch-diff", "symbolication", "golang"]
     }
   ]
 }

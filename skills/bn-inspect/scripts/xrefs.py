@@ -37,6 +37,30 @@ if _want_callers:
 if _want_callees:
     _ce = sorted({c.name for c in fn.callees})
     print("callees (%d): %s" % (len(_ce), ", ".join(_ce[:_limit])))
+if _want_data:
+    _drefs = []
+    try:
+        _drefs = list(_bv.get_data_refs(fn.start))
+    except Exception:
+        _drefs = []
+    print("data-refs to 0x%x (%d):" % (fn.start, len(_drefs)))
+    _n = 0
+    for _dr in _drefs:
+        if _n >= _limit:
+            print("  ...more data-refs"); break
+        print("  data 0x%-12x" % _dr)
+        _m = 0
+        try:
+            _crefs = list(_bv.get_code_refs(_dr))
+        except Exception:
+            _crefs = []
+        for _ref in _crefs:
+            if _m >= 8:
+                print("    ...more code refs to data slot"); break
+            _rf = _ref.function
+            print("    code 0x%-12x in %s" % (_ref.address, _rf.name if _rf else "?"))
+            _m += 1
+        _n += 1
 '''
 
 
@@ -47,6 +71,7 @@ def main():
     ap.add_argument("--addr", help="resolve by address instead (hex 0x.. or decimal)")
     ap.add_argument("--callers", action="store_true", help="only callers + call-sites")
     ap.add_argument("--callees", action="store_true", help="only callees")
+    ap.add_argument("--data", action="store_true", help="show data refs to the function address and code refs to those data slots")
     ap.add_argument("--limit", type=int, default=200, help="max entries per list (default 200)")
     a = ap.parse_args()
     if bool(a.name) == bool(a.addr):
@@ -55,9 +80,10 @@ def main():
     p["_name"] = bncm.vsym(a.name) if a.name else None
     p["_addr"] = bncm.vaddr(a.addr) if a.addr else None
     # default: show both
-    both = not (a.callers or a.callees)
+    both = not (a.callers or a.callees or a.data)
     p["_want_callers"] = bool(a.callers or both)
     p["_want_callees"] = bool(a.callees or both)
+    p["_want_data"] = bool(a.data)
     p["_limit"] = max(1, min(a.limit, 100000))
     bncm.run(BODY, **p)
 

@@ -46,6 +46,33 @@ _miss = []
 _errs = []
 _stubbed = set()
 
+def _set_function_type(_f, _t):
+    # BN is picky here: assigning the parsed Type object to f.type can report success
+    # while leaving some functions unchanged. The canonical function-type string sticks
+    # through set_user_type() on current BN builds. Fall back to auto type assignment only
+    # if the user type setter still does not take.
+    _want = str(_t)
+    _errs = []
+    try:
+        _f.set_user_type(_want)
+    except Exception as _e:
+        _errs.append("set_user_type: %r" % _e)
+    if str(_f.type) == _want:
+        return None
+    try:
+        _f.set_auto_type(_want)
+    except Exception as _e:
+        _errs.append("set_auto_type: %r" % _e)
+    if str(_f.type) == _want:
+        return None
+    try:
+        _f.type = _t
+    except Exception as _e:
+        _errs.append("type=: %r" % _e)
+    if str(_f.type) == _want:
+        return None
+    return "wanted %s, got %s%s" % (_want, _f.type, ("; " + "; ".join(_errs)) if _errs else "")
+
 # 1) TYPES FIRST -- structs/enums/typedefs, so later prototypes & var types can reference them.
 _tc = (_spec.get("types_c") or "").strip()
 if _tc:
@@ -78,7 +105,11 @@ for _addr_s in _funcs:
         _proto = _fd["proto"]
         try:
             _pt = _bv.parse_type_string(_proto)
-            _f.type = _pt[0]; _n["protos"] += 1
+            _err = _set_function_type(_f, _pt[0])
+            if _err:
+                _errs.append("%s proto apply: %s" % (_addr_s, _err))
+            else:
+                _n["protos"] += 1
         except Exception as _e:
             # a prototype often names inferred struct types that aren't declared yet -> forward-declare them
             # as opaque structs (captures the type intel for later) and retry once.
@@ -96,7 +127,11 @@ for _addr_s in _funcs:
             if _unk:
                 try:
                     _pt = _bv.parse_type_string(_proto)
-                    _f.type = _pt[0]; _n["protos"] += 1
+                    _err = _set_function_type(_f, _pt[0])
+                    if _err:
+                        _errs.append("%s proto apply: %s" % (_addr_s, _err))
+                    else:
+                        _n["protos"] += 1
                 except Exception as _e2:
                     _errs.append("%s proto: %r" % (_addr_s, _e2))
             else:

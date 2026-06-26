@@ -1,6 +1,6 @@
 export const meta = {
   name: 'phase3-v2-lens-review',
-  description: 'Phase-3 kernel re-audit: apply the v2 lens (int-overflow / double-fetch / UAF / uninit-disclosure) to the vmxnet3+e1000 datapath and PVSCSI/VSCSI surfaces; adversarially verify candidates.',
+  description: 'Phase-3 kernel re-audit: apply the v2 lens (int-overflow / double-fetch / race / UAF / uninit-disclosure / type-confusion) to the vmxnet3+e1000 datapath and PVSCSI/VSCSI surfaces; adversarially verify candidates.',
   phases: [
     { title: 'Review', detail: 'one agent per target function, v2-class analysis' },
     { title: 'Verify', detail: 'adversarial verification of each candidate finding' },
@@ -26,7 +26,7 @@ const FIND_SCHEMA = {
   type: 'object',
   properties: {
     findings: { type: 'array', items: { type: 'object', properties: {
-      pattern: { type: 'string', enum: ['int-overflow', 'double-fetch', 'uaf-lifetime', 'uninit-disclosure', 'other-oob'] },
+      pattern: { type: 'string', enum: ['int-overflow', 'double-fetch', 'race', 'uaf-lifetime', 'uninit-disclosure', 'type-confusion', 'other-oob', 'other'] },
       asm_addr: { type: 'string' }, description: { type: 'string' }, guest_input: { type: 'string' },
       severity: { type: 'string', enum: ['high', 'medium', 'low'] }, guest_reachable: { type: 'boolean' },
       confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
@@ -43,11 +43,13 @@ const VERDICT_SCHEMA = {
 }
 const CTX = `You are auditing a single ESXi 8.0.3 vmkernel function for the bug classes that actually escape hypervisors (Pwn2Own 2024-2025: VMXNET3 int-overflow CVE-2025-41236, PVSCSI heap-overflow CVE-2025-41238, VMCI underflow CVE-2025-41237, USB UAF, TOCTOU CVE-2025-22224). Disassemble with: objdump -d --no-show-raw-insn --start-address=<start> --stop-address=<end> ${BIN}
 Guest-controlled inputs: the guest writes the DMA ring descriptors (vmxnet3/e1000: per-descriptor buffer PA, length, flags, generation bit) and the PVSCSI/VSCSI SCSI request ring entries (CDB, data length, SG-element count/addresses). A second guest vCPU can MUTATE these in guest memory concurrently with the host reading them.
-Analyze ONLY for these v2 patterns; report concrete address-anchored findings (do NOT invent; if clean, return empty findings):
+Analyze ONLY for guest-reachable corruption/disclosure/concurrency/lifetime v2 patterns; report concrete address-anchored findings (do NOT invent; if clean, return empty findings):
  (1) int-overflow: a guest field through imul/shl/add/sub into a Heap_Alloc/memcpy SIZE with the bound check on the wrapped/truncated value or absent => undersized alloc -> OOB write.
  (2) double-fetch/TOCTOU: the function LOADS THE SAME guest-memory location MORE THAN ONCE with a validation/branch between, WITHOUT copying it to a host local first => racing guest changes it between check and use. (Copied-once-to-local = NOT double-fetch.)
- (3) uaf-lifetime: Heap_Free/*_Destroy/refcount-dec then a use of that object.
- (4) uninit-disclosure: NON-zeroing Heap_Alloc, partial fill, then copy/DMA back to guest.
+ (3) race: missing lock/refcount/serialization lets a concurrent guest-triggerable context mutate/free state across validation/use.
+ (4) uaf-lifetime: Heap_Free/*_Destroy/refcount-dec then a use of that object.
+ (5) uninit-disclosure: NON-zeroing Heap_Alloc, partial fill, then copy/DMA back to guest.
+ (6) type-confusion: guest-controlled selector/state causes an object, descriptor, or command buffer to be interpreted with the wrong layout or handler.
 Set guest_reachable precisely (guest ring write / SCSI request vs host-only path).`
 
 phase('Review')

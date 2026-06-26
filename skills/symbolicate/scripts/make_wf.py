@@ -5,8 +5,8 @@ Workflow scripts have no filesystem access, so the batch (evidence + HLIL) is em
 One agent per function proposes a VMware-style name + role comment + confidence (+ optional prototype) from
 the function's HLIL and evidence. The script returns the array of results; capture it and feed bn-sym-ingest.
 
-  bn-sym-makewf phil_notes/vmx-re/batch1.json --out phil_notes/vmx-re/batch1.wf.js
-  # then:  Workflow(scriptPath="phil_notes/vmx-re/batch1.wf.js")  -> save result -> bn-sym-ingest
+  bn-sym-makewf batch1.json --out batch1.wf.js
+  # then:  Workflow(scriptPath="batch1.wf.js")  -> save result -> bn-sym-ingest
 """
 import sys, os, json, argparse
 
@@ -36,10 +36,10 @@ function buildPrompt(rec) {
   const callers = (rec.named_callers || []).join(', ') || '(none)'
   const domain = (rec.domain || []).join(', ') || '(none)'
   return [
-    'You are reverse-engineering a STRIPPED VMware vmx binary (the userworld VM monitor; ESXi guest->host surface).',
-    'Name ONE function from its decompiled HLIL + evidence. Use the VMware C convention: ModuleCamelCase or Module_Verb,',
-    'with the module taken from the function\'s own strings/domain when possible. Be precise and concrete; do not invent a',
-    'module that the evidence does not support.',
+    'You are reverse-engineering a STRIPPED or symbol-poor binary from decompiled HLIL + harvested evidence.',
+    'Name ONE function using the target convention implied by the evidence/profile. For VMware-style profiles, prefer',
+    'ModuleCamelCase or Module_Verb with the module taken from the function\\'s own strings/domain when possible.',
+    'Be precise and concrete; do not invent a module or subsystem that the evidence does not support.',
     '',
     'IMPORTANT — work ONLY from the evidence provided below. Do NOT use any tools, run any commands, or investigate',
     'external files/databases; you already have everything you need here. Answer in one step via the structured output.',
@@ -73,7 +73,12 @@ const results = await parallel(BATCH.map(rec => () =>
     phase: 'Name',
   }).then(r => r ? Object.assign({ addr: rec.addr, tier: rec.tier }, r) : null)
 ))
-return results.filter(Boolean)
+// Return only a tiny summary — the full per-function records live in the agent transcript .jsonl files
+// on disk (harvested by harvest_all.py), so the completion notification stays small.
+const out = results.filter(Boolean)
+return { total: out.length,
+         named: out.filter(r => r.name && r.confidence !== 'none').length,
+         abstained: out.filter(r => !r.name || r.confidence === 'none').length }
 '''
 
 

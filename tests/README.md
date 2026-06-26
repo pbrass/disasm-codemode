@@ -1,7 +1,8 @@
 # disasm-codemode test suite
 
 Thorough tests for every skill in the plugin, against compiled C fixtures loaded into Binary
-Ninja via the code-mode MCP (plus the BN-independent `cap_scan`/`symdiff` paths).
+Ninja via the code-mode MCP (plus BN-independent/unit paths for scanners, ledgers, symbol recovery,
+and sidecar helpers).
 
 ## Run
 ```bash
@@ -12,8 +13,10 @@ nonzero iff a test FAILS. Tests that can't meet a precondition SKIP (they do not
 
 - **No capstone/pyelftools** in the running python → the `cap_scan`/`symdiff` tests skip.
 - **BN code-mode MCP not reachable** (`$BINJA_MCP_URL`, default `http://127.0.0.1:42069`) → all
-  the Binary Ninja integration tests skip; the `bncm` unit tests still run.
-- Env: `BINJA_MCP_URL`, `BINJA_MCP_KEY` (same as the skills).
+  the Binary Ninja integration tests skip; the `bncm`, `binary-audit`, and `symbolicate` unit tests still run.
+- **Ghidra MCP not reachable** (`$GHIDRA_MCP_HOST`/`$GHIDRA_MCP_PORT`) → Ghidra integration tests skip; the
+  `ghcm` unit tests still run.
+- Env: `BINJA_MCP_URL`, `BINJA_MCP_KEY`, `GHIDRA_MCP_HOST`, `GHIDRA_MCP_PORT` (same as the skills).
 
 ## Fixtures (`fixtures/`, built by `build.sh`)
 `target.c` is one program whose functions each exercise a feature/bug-class:
@@ -39,6 +42,12 @@ inputs `notelf.txt`/`empty.bin`.
   graceful handling of missing files, non-ELF/empty inputs, and stripped (no-`.symtab`) objects.
 - **bulk-decompile:** graceful `NO-MATCH` (no wrong-binary dump), and a real rebind+dump of a
   single leaf function from whatever binary is open.
+- **binary-audit (unit + live):** ledger-to-comment rendering, no-truncation ingest caps, exact target-name
+  matching in phase-2 ingest, and live `bn-audit-sync --file --save` persistence when BN MCP is available.
+- **symbolicate (unit):** deterministic log-prefix naming into sidecars, workflow generation, tiered
+  split/combine validation, abstention normalization, and sidecar ingest.
+- **re_sync (live):** `bn-re-apply --file --save` persists names, types, variables, line comments, and long
+  multi-line function comments when BN MCP is available.
 
 ## What "graceful" means here
 Every failure case asserts: a clear, specific message the agent can act on (e.g. `[reject] …`,

@@ -909,23 +909,24 @@ def unit_binary_audit():
                "preconditions": [{"text": "every CQE byte initialized", "kind": "init-complete", "klass": "caller"}],
                "suspected_bugs": [{"desc": "uninit CQE padding leaked to guest", "bug_class": "uninit-disclosure",
                                    "leak_back": "reaches-attacker", "disclosure_source": "stack",
-                                   "reachability": "guest", "guarded_by": ""}]},
-              {"function": "plain", "verdict": "bug",   # no disclosure fields -> must still ingest
-               "suspected_bugs": [{"desc": "plain oob", "bug_class": "oob"}]}]
+                                   "reachability": "guest", "guarded_by": "", "impact": "guest-readable-leak"}]},
+              {"function": "plain", "verdict": "bug",   # new class (null-deref) + impact; no disclosure fields
+               "suspected_bugs": [{"desc": "unchecked alloc deref", "bug_class": "null-deref",
+                                   "impact": "host-psod"}]}]
         wfp = os.path.join(td4, "wf.json"); open(wfp, "w").write(json.dumps(wf))
         env = dict(os.environ, KAUDIT_ROOT=td4)
         p = subprocess.run([PY, os.path.join(BA_SCRIPTS, "ingest.py"), wfp], capture_output=True, text=True, env=env, timeout=60)
         cx = sqlite3.connect(os.path.join(td4, "kreview.db"))
         cols = [r[1] for r in cx.execute("PRAGMA table_info(bug)")]
-        leak = cx.execute("SELECT leak_back,disclosure_source,reachability FROM bug WHERE func_name='leaker'").fetchone()
+        leak = cx.execute("SELECT leak_back,disclosure_source,reachability,impact FROM bug WHERE func_name='leaker'").fetchone()
         pk = cx.execute("SELECT kind FROM precondition WHERE func_name='leaker'").fetchone()
-        plain = cx.execute("SELECT leak_back FROM bug WHERE func_name='plain'").fetchone()
+        plain = cx.execute("SELECT bug_class,impact,leak_back FROM bug WHERE func_name='plain'").fetchone()
         cx.close()
         uassert("ingest runs clean (disclosure)", p.returncode == 0 and "Traceback" not in (p.stdout + p.stderr), (p.stdout + p.stderr)[:300])
-        uassert("bug migrated with disclosure columns", all(c in cols for c in ("leak_back", "disclosure_source", "reachability", "guarded_by")), "cols=%r" % cols)
-        uassert("disclosure fields stored", leak == ("reaches-attacker", "stack", "guest"), "leak=%r" % (leak,))
+        uassert("bug migrated with disclosure+impact columns", all(c in cols for c in ("leak_back", "disclosure_source", "reachability", "guarded_by", "impact")), "cols=%r" % cols)
+        uassert("disclosure + impact fields stored", leak == ("reaches-attacker", "stack", "guest", "guest-readable-leak"), "leak=%r" % (leak,))
         uassert("init-complete precondition kind stored", pk == ("init-complete",), "pk=%r" % (pk,))
-        uassert("bug without disclosure fields still ingests", plain == (None,), "plain=%r" % (plain,))
+        uassert("new bug_class (null-deref) + impact stored; missing disclosure fields OK", plain == ("null-deref", "host-psod", None), "plain=%r" % (plain,))
     except Exception as e:
         bad("ingest disclosure run", repr(e))
     finally:
@@ -970,13 +971,20 @@ def unit_binary_audit():
     try:
         import re as _re
         rwf = open(os.path.join(BA_SCRIPTS, "review-wf.js")).read()
-        for tok in ("init-complete", "leak_back", "reaches-attacker", "disclosure_source", "reachability", "host-local", "guarded_by"):
+        for tok in ("init-complete", "leak_back", "reaches-attacker", "disclosure_source", "reachability", "host-local", "guarded_by",
+                    "null-deref", "div-zero", "uninit-use", "type-confusion", "logic", "impact", "host-psod", "nonzero-divisor"):
             uassert("review-wf carries %r" % tok, tok in rwf, "missing from review-wf.js")
         uassert("review-wf prompt runs the disclosure lens", "disclosure lens" in rwf.lower())
-        prof = json.load(open(os.path.join(os.path.dirname(BA_SCRIPTS), "profiles", "esxi-vmkernel.json")))
+        uassert("review-wf flags checkpoint/restore as non-guest", "Restore" in rwf and "host-local" in rwf)
+        profdir = os.path.join(os.path.dirname(BA_SCRIPTS), "profiles")
+        prof = json.load(open(os.path.join(profdir, "esxi-vmkernel.json")))
         srx = _re.compile(prof["sink_regex"])
         for s in ("SgCopyTo", "CopyToMachine", "CopySGData", "DeliverPkt", "AllocKernelMem"):
             uassert("sink_regex matches disclosure sink %r" % s, bool(srx.search(s)), "no match")
+        vmxp = json.load(open(os.path.join(profdir, "vmx-userworld.json")))
+        ctx = vmxp["review_context"].lower()
+        for tok in ("null-deref", "div-zero", "type-confusion", "injection", "impact", "host-local"):
+            uassert("vmx profile review_context covers %r" % tok, tok in ctx, "missing from vmx review_context")
     except Exception as e:
         bad("disclosure lens wiring", repr(e))
 

@@ -3,6 +3,33 @@
 All notable changes to disasm-codemode. Versioning is semantic (MAJOR.MINOR.PATCH); pre-1.0,
 minor versions may add features and refine interfaces.
 
+## 0.11.0 — 2026-06-28
+
+### Binary-audit: broadened bug-class coverage + the impact filter + indirect-dispatch seeding
+Tuning the review lens from a full guest→host engagement — adds the classes the prior passes under-covered and
+forces the observable-impact discipline that culls static-loose-but-harmless findings.
+- **New bug classes** (`review-wf.js` enum + per-class recipes in the prompt): `null-deref` (unchecked
+  callee-NULL/`*Alloc`/lookup deref — demonstrated as live PSODs the v1 audit *missed*; controllable ones are
+  corruption), `div-zero` (attacker-influenced divisor/modulus, no nonzero guard → #DE), `uninit-use`
+  (uninitialized value used as a size/index/pointer = corruption, distinct from uninit-*disclosure*), and
+  `logic` (for privileged userworld targets: command/path injection, file-op TOCTOU/symlink, privilege/credential
+  checks — escape-class with zero memory corruption). `type-confusion` gained an actual detection recipe.
+- **Required `impact` field** (`host-psod`/`host-rce`/`host-mem-corruption`/`guest-readable-leak`/`vmx-rce`/
+  `vmx-crash`/`privesc`/`dos-other`/`none-or-guarded`/`unknown`): the reviewer must state the concrete
+  attacker-OBSERVABLE outcome, not the mechanism — the single biggest calibration lever against the
+  over-produced `confirmed-violable` findings that were runtime-guarded or whose over-read is discarded.
+- **Checkpoint/restore reachability rule**: `*Cpt*`/`*Checkpoint*`/`*Restore*`/`*Load*`/`*SaveState*` are the
+  forged-checkpoint/vMotion path = host-local/migration, NOT guest — the prompt + vmx profile now tag them so
+  up front (this engagement repeatedly re-discovered it at adjudication time).
+- **Indirect-dispatch seeding promoted from a footnote to an active step** (SKILL.md): recover the dispatch-table
+  targets (ops-tables / `vmkFuncTable` / vmx device-ops) and feed them in as reachability roots via the profile
+  `anchors` before scoring — device-op handlers reached only through `[ops+N]` are invisible to the direct call
+  graph and otherwise score ~0 (exactly why the v1 pass missed the nfs41client callback PSODs).
+- vmx-userworld profile `review_context` enriched with all of the above + a build note (re-anchor in the live `g`
+  binary via string xrefs; symbolicated-`i` artifact addresses don't map). New precondition kind `nonzero-divisor`.
+- `ingest.py` idempotently migrates the `impact` column; new regression tests cover the classes/impact/kind +
+  the prompt+profile wiring (269 checks, all green).
+
 ## 0.10.0 — 2026-06-28
 
 ### Binary-audit: uninitialized-disclosure lens promoted to the first pass

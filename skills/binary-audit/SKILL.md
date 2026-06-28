@@ -157,13 +157,25 @@ For each ranked function (call-tree order from the roots — a hot root pulls in
    randomization makes this a first-class objective, not an afterthought — a single leaked kernel pointer unblocks
    every write primitive.
 3. **Classify**: `self` / `caller` / `unguaranteed`. caller + unguaranteed = attack surface.
-4. **Desk-check**: OOB r/w, int overflow/truncation, off-by-one, UAF, double-free, TOCTOU, **uninit-disclosure**,
-   type confusion, error-path cleanup, unchecked returns. For **every read/over-read/uninit**, classify the two
-   filters or the finding is not actionable: **leak-back** (does the data reach the attacker, or is it consumed
-   internally and discarded → DoS-not-leak?) and **reachability-origin** (which actor BOTH supplies the input and
-   reads the output: `guest` / `userworld` / `rogue-peer` / `host-local` — a leak readable only by the userworld
-   or host root is *not* a guest escape). Record the defusing **guard** (memset/exact-overwrite/0xFF tail-fill/
-   clamp address) even on a refutation — a sibling path missing it is the next lead.
+4. **Desk-check** ALL classes: OOB r/w, int overflow/trunc/sign, off-by-one, UAF/double-free/refcount, TOCTOU
+   (incl. a 2nd vCPU racing shared rings/headers), **uninit-disclosure**, and the classes prior passes
+   UNDER-COVERED — hunt them explicitly: **null-deref** (unchecked callee-NULL/`*Alloc`/lookup deref — we
+   demonstrated this as live PSODs and the v1 audit *missed* them, [[kernel-audit-callback-nullderef-gap]];
+   controllable ones = corruption, not just a crash); **div-zero/#DE** (attacker-influenced divisor/modulus,
+   no nonzero guard); **uninit-use** (uninit value used as a size/index/pointer = corruption, distinct from
+   uninit-*disclosure*); **type-confusion** (attacker/restored tag/handle/opcode → wrong struct/union/handler);
+   and for **privileged userworld targets**, **logic** bugs (command/path injection, file-op TOCTOU/symlink,
+   privilege/credential checks) — escape-class with zero memory corruption. Then on every finding:
+   - **leak-back** (for reads/uninit): reaches-attacker vs discarded(=DoS-not-leak) vs side-channel.
+   - **reachability-origin**: `guest`/`userworld`/`rogue-peer`/`host-local`. **`*Cpt*`/`*Checkpoint*`/`*Restore*`/
+     `*Load*`/`*SaveState*` = the checkpoint/migration path = forged by the trusted VMX or vMotion source =
+     host-local/migration, NOT guest** — tag them so up front (this session burned cycles re-discovering it).
+   - **impact**: the concrete attacker-OBSERVABLE outcome (host-psod/host-rce/guest-readable-leak/vmx-rce/
+     privesc/none-or-guarded) — *what the attacker actually gets*, not the mechanism. This is the biggest
+     calibration lever: it kills the static-loose-but-harmless findings (guarded at runtime, or over-read
+     discarded) at review time.
+   - the defusing **guard** (memset/exact-overwrite/0xFF tail-fill/clamp/NULL-check addr) even on a refutation —
+     a sibling path (other caller, command, device variant) missing it is the next lead.
 The parallel implementation (`review-wf*.js`) fans out one subagent per function (reads pre-extracted
 `hlil/<fn>.hlil.c` + `asm/<fn>.asm`), returning a schema-validated record. Solo works too — same loop.
 
@@ -323,7 +335,7 @@ ground-truth defect. (tcpip4: prior findings F2/F3/F5 as anchors; vmci: no prior
   Full history: `SELECT audit_pass,verdict,evidence FROM audit WHERE func_name=? ORDER BY audit_pass`.
 
 **v2 columns (analysis-type aware — added for the Stage-4 lens):**
-- `bug.bug_class` ∈ {`oob`, `int-overflow`, `double-fetch`, `uaf-lifetime`, `uninit-disclosure`, `race`, `type-confusion`, `other`} —
+- `bug.bug_class` ∈ {`oob`, `int-overflow`, `double-fetch`, `uaf-lifetime`, `uninit-disclosure`, `uninit-use`, `null-deref`, `div-zero`, `type-confusion`, `race`, `logic`, `other`} and `bug.impact` ∈ {`host-psod`, `host-rce`, `host-mem-corruption`, `guest-readable-leak`, `vmx-rce`, `vmx-crash`, `privesc`, `dos-other`, `none-or-guarded`, `unknown`} (the observable-outcome filter) —
   the exploited-class taxonomy; slice the ledger by class, e.g.
   `SELECT func_name,status FROM bug WHERE bug_class='double-fetch'`.
 - `audit.guard` — the EXACT defusing check (+address) recorded on a `refuted`/`confirmed-latent` verdict
@@ -332,7 +344,8 @@ ground-truth defect. (tcpip4: prior findings F2/F3/F5 as anchors; vmci: no prior
   > `gated` > `candidate-needs-poc` > `partial` > `refuted` (+ decider-loop terminals
   `exhausted-guest-entry` / `-extsym` / `-depthcap` / `-cycle`). All worklists are plain SQL.
 - Migrations are idempotent (`ALTER TABLE … ADD COLUMN`), so an existing pre-v2 ledger picks up `bug_class`,
-  `guard`, and the disclosure columns (`leak_back`/`disclosure_source`/`reachability`/`guarded_by`) on the next ingest.
+  `guard`, the disclosure columns (`leak_back`/`disclosure_source`/`reachability`/`guarded_by`), and `impact` on
+  the next ingest.
 
 ## Stage 4 — live validation: reachability ≠ exploitability (v2, the key correction)
 The rank→infer→attack pipeline reliably **produces candidates**, but its `confirmed-violable` bar (static: a
@@ -393,9 +406,15 @@ surface honestly characterized is a real deliverable, and the guard taxonomy is 
 next product/version.
 
 ## Known limitations (be honest in reports)
-- **Indirect-dispatch gap**: function-pointer/vtable/syscall-table edges are missing from the direct call
-  graph, so some genuinely-reachable handlers show `dist=-1` and get floored. Mitigation: name-seed them; v2
-  = recover indirect edges (`mov [ops+N], func` stores + jump tables).
+- **Indirect-dispatch gap (DO THIS — the highest-leverage reachability fix)**: function-pointer/vtable/
+  ops-table/syscall-table edges are missing from the direct call graph, so the guest-reachable *device-op
+  handlers* — reached ONLY via a dispatch table — show `dist=-1` and get floored to ~0, i.e. the audit ranks
+  the WRONG functions. This is exactly why the v1 pass missed the nfs41client callback PSODs
+  ([[kernel-audit-callback-nullderef-gap]]). **Before scoring, recover the dispatch-table targets and feed them
+  in as reachability roots** via the profile's `anchors` list (or name-seed them in `seed_regex`): scan the data
+  section for the `mov [ops+N], func` / vtable / jump-table stores (e.g. the vmkernel `vmkFuncTable`, the vmx
+  device-ops tables — the vmx-audit's `dispatch-table-*.json` already holds these). A handler that is only ever
+  called through `[ops+N]` is invisible to the direct graph but is the guest's actual entry point.
 - Features are static heuristics (call-name + addressing), not full dataflow; a TAINTDIST (taint→sink
   distance) refinement on the top-N via a decompiler is the next accuracy lever.
 - readelf symbol *sizes* can be noisy — trust the decompiler's function size for any single-function claim.

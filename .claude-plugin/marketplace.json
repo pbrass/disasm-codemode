@@ -3,7 +3,7 @@
   "owner": { "name": "Phil Brass", "url": "https://github.com/pbrass" },
   "metadata": {
     "description": "Marketplace for the disasm-codemode plugin (drive a decompiler's code-mode MCP for RE / symbol recovery / patch-diff / bug hunting).",
-    "version": "0.11.0"
+    "version": "0.11.1"
   },
   "plugins": [
     {

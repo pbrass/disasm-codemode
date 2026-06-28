@@ -3,6 +3,21 @@
 All notable changes to disasm-codemode. Versioning is semantic (MAJOR.MINOR.PATCH); pre-1.0,
 minor versions may add features and refine interfaces.
 
+## 0.11.1 — 2026-06-28
+
+### Fix: `review-wf.js` failed to parse as JavaScript (binary-audit Workflow launch path)
+The Stage-2 review prompt is a backtick-delimited JS template literal, but its prose used markdown backticks
+(`` `div` ``/`` `idiv` ``/`` `%` ``, `` `*_Alloc` ``/`` `*_Get` ``, `` `*Cpt*` ``/`` `*Checkpoint*` ``/…) that
+broke OUT of the string — so `Workflow({scriptPath: review-wf-bN.js})`, the skill's primary parallel-review
+launch path, failed with `Unexpected token`. The bug stayed latent because the prior large engagement drove the
+generated scripts through Codex/ephemeral workers (plain text), which never invoked a JS parser.
+- Escaped the 20 prose backticks in the `review-wf.js` PROMPT template literal (the legitimate `f.locality`
+  nested-template is preserved). No change to the rendered prompt the reviewer sees, or to the schema/lens.
+- **New regression test** (`tests/run_tests.py`): `review-wf.js` must pass `node --check` under a harness-faithful
+  wrap (strip `export`, stub the `phase`/`agent`/`pipeline` hooks, wrap top-level `return`/`await` in an async
+  fn). Skips cleanly when `node` is absent. This guards the whole template-literal prompt against future
+  break-out edits, not just these characters.
+
 ## 0.11.0 — 2026-06-28
 
 ### Binary-audit: broadened bug-class coverage + the impact filter + indirect-dispatch seeding

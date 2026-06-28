@@ -976,6 +976,25 @@ def unit_binary_audit():
             uassert("review-wf carries %r" % tok, tok in rwf, "missing from review-wf.js")
         uassert("review-wf prompt runs the disclosure lens", "disclosure lens" in rwf.lower())
         uassert("review-wf flags checkpoint/restore as non-guest", "Restore" in rwf and "host-local" in rwf)
+        # regression (2026-06-28): review-wf.js MUST parse as valid JS under the Workflow harness wrapping.
+        # The prompt is a backtick-delimited template literal; markdown backticks in the prose (`div`, `*_Alloc`,
+        # `*Cpt*`...) previously broke OUT of the string -> the skill's primary launch path,
+        # Workflow(review-wf-bN.js), failed to parse. (The prior pass drove it via Codex/text, so it never hit a
+        # JS parser.) node --check on a harness-faithful wrap (strip `export`, stub the hooks, wrap top-level
+        # return/await in an async fn) is the real guard.
+        import shutil as _sh, tempfile as _tf
+        _node = _sh.which("node")
+        if not _node:
+            skip("review-wf.js parses as valid JS", "node not installed")
+        else:
+            _wrapped = ("const phase=()=>{},log=()=>{},agent=async()=>({}),pipeline=async()=>[],parallel=async()=>[];\n"
+                        "async function __wf(){\n" + rwf.replace("export const meta", "const meta") + "\n}\n")
+            _mjs = os.path.join(_tf.gettempdir(), "_ba_reviewwf_check.mjs")
+            open(_mjs, "w").write(_wrapped)
+            _r = subprocess.run([_node, "--check", _mjs], capture_output=True, text=True)
+            uassert("review-wf.js parses as valid JS (Workflow launch path)", _r.returncode == 0, _r.stderr[:400])
+            try: os.remove(_mjs)
+            except Exception: pass
         profdir = os.path.join(os.path.dirname(BA_SCRIPTS), "profiles")
         prof = json.load(open(os.path.join(profdir, "esxi-vmkernel.json")))
         srx = _re.compile(prof["sink_regex"])

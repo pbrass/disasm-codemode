@@ -21,7 +21,10 @@ if not isinstance(recs,list):
     print("could not parse decider verdict array/object"); sys.exit(1)
 wl=json.load(open(WL)); con=sqlite3.connect(f"{ROOT}/kreview.db"); cur=con.cursor()
 cur.execute("CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY, func_name TEXT, verdict TEXT, evidence TEXT, guest_path TEXT, residual TEXT, next TEXT, confidence TEXT, guard TEXT)")
-try: cur.execute("ALTER TABLE audit ADD COLUMN guard TEXT")
+for col in ["guard TEXT", "audit_pass INTEGER", "audited_at TEXT"]:
+    try: cur.execute(f"ALTER TABLE audit ADD COLUMN {col}")
+    except Exception: pass
+try: cur.execute("ALTER TABLE func ADD COLUMN n_audited INTEGER DEFAULT 0")
 except Exception: pass
 SYMS=set(r[0] for r in cur.execute("SELECT name FROM func") if r[0])
 SYMSL=sorted((s for s in SYMS if s), key=len, reverse=True)
@@ -55,8 +58,10 @@ for r in recs:
     p=pair(c,d); depth=(p.get("depth",1) if p else 1)
     if p: p["status"]="done"; p["verdict"]=v
     wl.setdefault("audited",{})[d]=v
-    cur.execute("INSERT INTO audit(func_name,verdict,evidence,guest_path,residual,next,confidence) VALUES(?,?,?,?,?,?,?)",
-      (d,v,text(r.get('evidence'),8000)+f"  [decides {c}]",text(r.get('guest_reachable_path'),8000),text(r.get('residual_unknowns'),2000),text(r.get('recommended_next'),1000),text(r.get('confidence',''))))
+    d_prev = cur.execute("SELECT COALESCE(MAX(audit_pass),0) FROM audit WHERE func_name=?", (d,)).fetchone()[0]
+    cur.execute("INSERT INTO audit(func_name,verdict,evidence,guest_path,residual,next,confidence,audit_pass,audited_at) VALUES(?,?,?,?,?,?,?,?,datetime('now'))",
+      (d,v,text(r.get('evidence'),8000)+f"  [decides {c}]",text(r.get('guest_reachable_path'),8000),text(r.get('residual_unknowns'),2000),text(r.get('recommended_next'),1000),text(r.get('confidence','')),d_prev+1))
+    cur.execute("UPDATE func SET n_audited=COALESCE(n_audited,0)+1 WHERE name=?", (d,))
     newstatus=None
     if v in TERM:
         newstatus=TERM[v]
@@ -72,9 +77,10 @@ for r in recs:
                 "precondition":text(r.get('recommended_next'),1000),"status":"pending","depth":depth+1})
     if newstatus:
         cur.execute("UPDATE bug SET status=? WHERE func_name=? AND status NOT IN ('confirmed-violable')", (newstatus,c))
-        cur.execute("DELETE FROM audit WHERE func_name=?", (c,))
-        cur.execute("INSERT INTO audit(func_name,verdict,evidence,guest_path,residual,next,confidence) VALUES(?,?,?,?,?,?,?)",
-          (c,v,text(r.get('evidence'),8000)+f"  [resolved via {d}]",text(r.get('guest_reachable_path'),8000),text(r.get('residual_unknowns'),2000),text(r.get('recommended_next'),1000),text(r.get('confidence',''))))
+        c_prev = cur.execute("SELECT COALESCE(MAX(audit_pass),0) FROM audit WHERE func_name=?", (c,)).fetchone()[0]
+        cur.execute("INSERT INTO audit(func_name,verdict,evidence,guest_path,residual,next,confidence,audit_pass,audited_at) VALUES(?,?,?,?,?,?,?,?,datetime('now'))",
+          (c,v,text(r.get('evidence'),8000)+f"  [resolved via {d}]",text(r.get('guest_reachable_path'),8000),text(r.get('residual_unknowns'),2000),text(r.get('recommended_next'),1000),text(r.get('confidence','')),c_prev+1))
+        cur.execute("UPDATE func SET n_audited=COALESCE(n_audited,0)+1 WHERE name=?", (c,))
 con.commit(); json.dump(wl,open(WL,'w'),indent=0)
 pend=sum(1 for p in wl["frontier"] if p["status"]=="pending")
 print(f"ingested {len(recs)} decider verdicts:", tally)

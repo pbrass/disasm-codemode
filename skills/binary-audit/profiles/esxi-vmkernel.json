@@ -1,7 +1,7 @@
 {
   "name": "esxi-vmkernel",
-  "description": "ESXi vmkernel (k.b00) guest->host + everything-reachable attack surface",
-  "sink_regex": "(_?vmk_)?(Memcpy|Memmove|memcpy|memmove|memset|bcopy|strcpy|strncpy|strcat|strlcpy|sprintf|CopyIn|CopyOut|CopyFromMachine|Heap_?Alloc|Mem_?Alloc|Pkt_?Alloc|World_?Alloc|MemAlloc)",
+  "description": "ESXi vmkernel (k.b00) guest->host + everything-reachable attack surface. Disclosure note: NON-zeroing allocators (Heap_Alloc/Mem_Alloc/*_AllocKernelMem with no following memset, vs zeroing Heap_AllocZ) feeding a copy-OUT-to-attacker sink (CopyOut/SgCopyTo/CopyToMachine/CopySGData/DeliverPkt + the guest ring writes) are the uninit-disclosure seed; the review prompt does the per-byte init check.",
+  "sink_regex": "(_?vmk_)?(Memcpy|Memmove|memcpy|memmove|memset|bcopy|strcpy|strncpy|strcat|strlcpy|sprintf|CopyIn|CopyOut|CopyFromMachine|CopyToMachine|SgCopyTo|SgCopyFrom|CopySGData|CopySgData|DeliverPkt|Heap_?Alloc|Mem_?Alloc|Pkt_?Alloc|World_?Alloc|MemAlloc|AllocKernelMem)",
   "state_regex": "(_?vmk_)?(Free|Release|Put|RefCount|Ref_|_Lock|_Unlock|SpinLock|SP_Lock|SP_Unlock|Mutex|Sema)",
   "seed_regex": "((E1000|Vmxnet[23]|Pvscsi|PVSCSI|Ahci|AHCI|Xhci|Ehci|Uhci|XHCI|EHCI|UHCI|Usb|USB|Svga|SVGA|HdAudio|Hbr|Pvrdma|PVRDMA|Vrdma|vRDMA|Sata|SATA|Lsilogic|LSILogic|Vmxnet|VMKDev|VDev|Vusb)\\w*(Tx|Rx|Io|IO|Mmio|MMIO|Pio|Reg|Ring|Dma|DMA|Cmd|Handle|Dispatch|Process|Recv|Send|Async|Backend|Read|Write|Doorbell|Kick)|(Backdoor|BDOOR|Bdoor|Vmci|VMCI|Rpci|RPCI|Vix|Hostif)\\w*|(Hypercall|VMKCall|Vmkcall|VMMCall|UWVMK|Uwvmk|UserVMK|VMKLinuxSys|VMKLinux\\w*Sys)\\w*|(Tcpip|Tcp|Ip4|Ip6|Udp|Ether|Eth|Arp|ARP|Icmp|Pkt|Uplink|Netq|ENS|Ens)\\w*(Input|Recv|Rx|Rcv|Process|Handle|Parse|Demux|Reass|Frag)|(Psa|Nvme|NVMF|Nvmf|Iscsi|ISCSI|ScsiTarget|FCoE|Fcoe|Vmkfc|Fc)\\w*(Complete|Recv|Process|Cmd|Resp|Response|Identify|Parse|Handle|CB)|\\w*Vsi\\w*(Set|Write|Add)|\\w*(Ioctl|IOCTL)\\w*)",
   "weights": {

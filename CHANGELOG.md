@@ -3,6 +3,40 @@
 All notable changes to disasm-codemode. Versioning is semantic (MAJOR.MINOR.PATCH); pre-1.0,
 minor versions may add features and refine interfaces.
 
+## 0.10.0 — 2026-06-28
+
+### Binary-audit: uninitialized-disclosure lens promoted to the first pass
+Address randomization makes an info-leak the highest-leverage primitive (a single leaked kernel pointer
+defeats kASLR and unblocks every write primitive), but the first-pass review only listed `uninit-disclosure`
+in an enum — the actual hunting recipe lived only in the second-pass v2-lens harness. Folded it into the
+canonical `scripts/review-wf.js`:
+- The contract-inference step now runs **the disclosure lens** on every host write of a struct/buffer into
+  attacker-readable memory (rings, descriptors, response/SgCopyTo buffers, datagrams, shared pages):
+  non-zeroing alloc → partial/conditional fill → copy-back, plus the copy-length-exceeds-init-source shape.
+  Adds the `init-complete` precondition kind.
+- Every read/over-read/uninit must now be classified by two filters or it is not actionable:
+  **leak-back** (`reaches-attacker` vs `discarded`=DoS-not-leak vs `side-channel`) and **reachability-origin**
+  (`guest` / `userworld` / `rogue-peer` / `host-local` — a leak readable only by the userworld or host root is
+  not a guest escape). New `suspected_bugs` fields `leak_back`, `disclosure_source`, `reachability`, plus
+  `guarded_by` to record the exact defusing instruction on a refutation.
+- `ingest.py` idempotently migrates the four new `bug` columns and persists them; the real guest-leak query is
+  one line: `WHERE leak_back='reaches-attacker' AND reachability='guest' AND disclosure_source IN ('stack','heap')`.
+- Profiles gain the copy-to-attacker disclosure sinks (`SgCopyTo`/`CopyToMachine`/`CopySGData`/`DeliverPkt`/
+  `AllocKernelMem`); SKILL.md documents the lens, the two filters, and the full-init/anti-leak guard
+  class with a calibration datum (ESXi guest-facing completion rings are systematically zero-filled, so the
+  reachability filter — not the bug filter — culls most disclosure leads).
+
+### Binary-audit: audit ledger append-history + phase-2 auto-bug
+The audit ingest now **preserves history instead of replacing** it (`ingest_phase2.py`, `ingest_deciders.py`,
+`ingest_guestentry.py`):
+- New `audit.audit_pass` (per-function sequence) + `audit.audited_at` (UTC) columns and `func.n_audited`; each
+  ingest appends a new audit row, so the full analysis history is queryable. Default flipped from `--append`
+  to append-by-default (`--replace` to opt back into delete-then-insert).
+- Phase-2 now auto-creates a class-inferred `bug` row for a `confirmed-violable` verdict on a function that had
+  no phase-1 bug (a deeper pass can surface bugs the first pass missed); the existence check is schema-agnostic.
+- New regression tests cover the disclosure columns/kind, the schema/profile wiring, append-history
+  (`audit_pass` 1→2 + `n_audited`), and phase-2 auto-bug (254 checks, all green).
+
 ## 0.9.0 — 2026-06-26
 
 ### New: `symbolicate` — evidence-driven mass symbol recovery for stripped binaries

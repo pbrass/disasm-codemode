@@ -894,6 +894,92 @@ def unit_binary_audit():
     finally:
         shutil.rmtree(td3, ignore_errors=True)
 
+    # ingest.py disclosure lens: migrate + store leak_back/disclosure_source/reachability/guarded_by
+    # + init-complete precondition kind; a bug WITHOUT the new fields must still ingest (backward-compat).
+    print("## binary-audit: ingest disclosure columns (no MCP)")
+    td4 = tempfile.mkdtemp(prefix="ba_disc_")
+    try:
+        cx = sqlite3.connect(os.path.join(td4, "kreview.db"))
+        cx.execute("CREATE TABLE func(addr INTEGER, name TEXT)")
+        cx.execute("INSERT INTO func VALUES(?,?)", (0x10, "leaker"))
+        cx.execute("INSERT INTO func VALUES(?,?)", (0x20, "plain"))
+        cx.commit(); cx.close()
+        wf = [{"function": "leaker", "verdict": "bug",
+               "summary": "writes a partially-initialized struct to the guest CQ ring",
+               "preconditions": [{"text": "every CQE byte initialized", "kind": "init-complete", "klass": "caller"}],
+               "suspected_bugs": [{"desc": "uninit CQE padding leaked to guest", "bug_class": "uninit-disclosure",
+                                   "leak_back": "reaches-attacker", "disclosure_source": "stack",
+                                   "reachability": "guest", "guarded_by": ""}]},
+              {"function": "plain", "verdict": "bug",   # no disclosure fields -> must still ingest
+               "suspected_bugs": [{"desc": "plain oob", "bug_class": "oob"}]}]
+        wfp = os.path.join(td4, "wf.json"); open(wfp, "w").write(json.dumps(wf))
+        env = dict(os.environ, KAUDIT_ROOT=td4)
+        p = subprocess.run([PY, os.path.join(BA_SCRIPTS, "ingest.py"), wfp], capture_output=True, text=True, env=env, timeout=60)
+        cx = sqlite3.connect(os.path.join(td4, "kreview.db"))
+        cols = [r[1] for r in cx.execute("PRAGMA table_info(bug)")]
+        leak = cx.execute("SELECT leak_back,disclosure_source,reachability FROM bug WHERE func_name='leaker'").fetchone()
+        pk = cx.execute("SELECT kind FROM precondition WHERE func_name='leaker'").fetchone()
+        plain = cx.execute("SELECT leak_back FROM bug WHERE func_name='plain'").fetchone()
+        cx.close()
+        uassert("ingest runs clean (disclosure)", p.returncode == 0 and "Traceback" not in (p.stdout + p.stderr), (p.stdout + p.stderr)[:300])
+        uassert("bug migrated with disclosure columns", all(c in cols for c in ("leak_back", "disclosure_source", "reachability", "guarded_by")), "cols=%r" % cols)
+        uassert("disclosure fields stored", leak == ("reaches-attacker", "stack", "guest"), "leak=%r" % (leak,))
+        uassert("init-complete precondition kind stored", pk == ("init-complete",), "pk=%r" % (pk,))
+        uassert("bug without disclosure fields still ingests", plain == (None,), "plain=%r" % (plain,))
+    except Exception as e:
+        bad("ingest disclosure run", repr(e))
+    finally:
+        shutil.rmtree(td4, ignore_errors=True)
+
+    # phase2 audit-append-history: re-ingest APPENDS (audit_pass 1,2) + func.n_audited tracks;
+    # a confirmed-violable verdict for a function with no prior bug auto-creates one (class-inferred).
+    print("## binary-audit: phase2 append-history + auto-bug (no MCP)")
+    td5 = tempfile.mkdtemp(prefix="ba_p2h_")
+    try:
+        dbp = os.path.join(td5, "kreview.db")
+        cx = sqlite3.connect(dbp)
+        cx.executescript(
+            "CREATE TABLE func(addr INTEGER, name TEXT, score REAL);"
+            "CREATE TABLE bug(id INTEGER PRIMARY KEY, func_addr INTEGER, func_name TEXT, desc TEXT, location TEXT, severity TEXT, confidence TEXT, why TEXT, status TEXT, bug_class TEXT);"
+            "CREATE TABLE precondition(func_name TEXT, klass TEXT, status TEXT);")
+        cx.execute("INSERT INTO func VALUES(?,?,?)", (0x3000, "NewBugFn", 1.0))
+        cx.execute("INSERT INTO precondition VALUES(?,?,?)", ("NewBugFn", "caller", "open"))
+        cx.commit(); cx.close()
+        env = dict(os.environ, KAUDIT_ROOT=td5)
+        o1 = os.path.join(td5, "p1.json"); open(o1, "w").write(json.dumps({"target": "NewBugFn", "verdict": "uncertain"}))
+        subprocess.run([PY, os.path.join(BA_SCRIPTS, "ingest_phase2.py"), o1], capture_output=True, text=True, env=env, timeout=60)
+        o2 = os.path.join(td5, "p2.json"); open(o2, "w").write(json.dumps({"target": "NewBugFn", "verdict": "violable-bug", "evidence": "integer overflow in the size math"}))
+        p = subprocess.run([PY, os.path.join(BA_SCRIPTS, "ingest_phase2.py"), o2], capture_output=True, text=True, env=env, timeout=60)
+        cx = sqlite3.connect(dbp)
+        passes = [r[0] for r in cx.execute("SELECT audit_pass FROM audit WHERE func_name='NewBugFn' ORDER BY audit_pass")]
+        naud = cx.execute("SELECT n_audited FROM func WHERE name='NewBugFn'").fetchone()
+        newbug = cx.execute("SELECT status,bug_class FROM bug WHERE func_name='NewBugFn'").fetchone()
+        cx.close()
+        uassert("phase2 append-history runs clean", p.returncode == 0 and "Traceback" not in (p.stdout + p.stderr), (p.stdout + p.stderr)[:300])
+        uassert("audit rows APPEND across passes (1,2)", passes == [1, 2], "passes=%r" % (passes,))
+        uassert("func.n_audited tracks pass count", naud == (2,), "naud=%r" % (naud,))
+        uassert("confirmed-violable auto-creates a class-inferred bug", newbug == ("confirmed-violable", "int-overflow"), "newbug=%r" % (newbug,))
+    except Exception as e:
+        bad("phase2 append-history run", repr(e))
+    finally:
+        shutil.rmtree(td5, ignore_errors=True)
+
+    # disclosure-lens wiring: the first-pass review prompt+schema must carry the lens, and the
+    # profile sink set must match the copy-to-attacker disclosure sinks (so candidates rank up).
+    print("## binary-audit: disclosure lens wiring (no MCP)")
+    try:
+        import re as _re
+        rwf = open(os.path.join(BA_SCRIPTS, "review-wf.js")).read()
+        for tok in ("init-complete", "leak_back", "reaches-attacker", "disclosure_source", "reachability", "host-local", "guarded_by"):
+            uassert("review-wf carries %r" % tok, tok in rwf, "missing from review-wf.js")
+        uassert("review-wf prompt runs the disclosure lens", "disclosure lens" in rwf.lower())
+        prof = json.load(open(os.path.join(os.path.dirname(BA_SCRIPTS), "profiles", "esxi-vmkernel.json")))
+        srx = _re.compile(prof["sink_regex"])
+        for s in ("SgCopyTo", "CopyToMachine", "CopySGData", "DeliverPkt", "AllocKernelMem"):
+            uassert("sink_regex matches disclosure sink %r" % s, bool(srx.search(s)), "no match")
+    except Exception as e:
+        bad("disclosure lens wiring", repr(e))
+
 
 def unit_symbolicate():
     """No MCP: deterministic naming, workflow generation, split/combine, and sidecar ingest."""

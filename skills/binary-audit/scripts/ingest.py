@@ -30,8 +30,9 @@ con=sqlite3.connect(f"{ROOT}/kreview.db"); cur=con.cursor()
 cur.execute("CREATE TABLE IF NOT EXISTS review(addr INTEGER PRIMARY KEY, name TEXT, reviewed_at TEXT, reviewer TEXT, verdict TEXT, notes TEXT)")
 cur.execute("CREATE TABLE IF NOT EXISTS precondition(id INTEGER PRIMARY KEY, func_addr INTEGER, func_name TEXT, text TEXT, kind TEXT, klass TEXT, sink TEXT, status TEXT, attack_note TEXT)")
 cur.execute("CREATE TABLE IF NOT EXISTS bug(id INTEGER PRIMARY KEY, func_addr INTEGER, func_name TEXT, desc TEXT, location TEXT, severity TEXT, confidence TEXT, why TEXT, status TEXT, bug_class TEXT)")
-try: cur.execute("ALTER TABLE bug ADD COLUMN bug_class TEXT")   # v2 taxonomy migration (idempotent)
-except Exception: pass
+for _col in ("bug_class TEXT","leak_back TEXT","disclosure_source TEXT","reachability TEXT","guarded_by TEXT"):
+    try: cur.execute("ALTER TABLE bug ADD COLUMN %s" % _col)   # v2 + disclosure/reachability migration (idempotent)
+    except Exception: pass
 today=datetime.date.today().isoformat()
 n_p=n_b=0
 for rec in recs:
@@ -51,7 +52,8 @@ for rec in recs:
         cur.execute("INSERT INTO precondition(func_addr,func_name,text,kind,klass,sink,status,attack_note) VALUES(?,?,?,?,?,?,?,?)",
           (addr,nm,p.get('text'),p.get('kind'),p.get('klass'),p.get('sink',''),'open',p.get('attack_note',''))); n_p+=1
     for b in rec.get('suspected_bugs') or []:
-        cur.execute("INSERT INTO bug(func_addr,func_name,desc,location,severity,confidence,why,status,bug_class) VALUES(?,?,?,?,?,?,?,?,?)",
-          (addr,nm,b.get('desc'),b.get('location',''),b.get('severity',''),b.get('confidence','low'),b.get('why',''),'open',b.get('bug_class',b.get('pattern','oob')))); n_b+=1
+        cur.execute("INSERT INTO bug(func_addr,func_name,desc,location,severity,confidence,why,status,bug_class,leak_back,disclosure_source,reachability,guarded_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+          (addr,nm,b.get('desc'),b.get('location',''),b.get('severity',''),b.get('confidence','low'),b.get('why',''),'open',b.get('bug_class',b.get('pattern','oob')),
+           b.get('leak_back'),b.get('disclosure_source'),b.get('reachability'),b.get('guarded_by'))); n_b+=1
 con.commit()
 print(f"ingested {len(recs)} reviews, {n_p} preconditions, {n_b} suspected bugs")

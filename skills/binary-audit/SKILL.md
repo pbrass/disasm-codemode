@@ -149,10 +149,21 @@ For each ranked function (call-tree order from the roots — a hot root pulls in
 1. **Orient**: what it does; provenance of each param/global (attacker / kernel-internal / validated-upstream).
 2. **Contract inference**: for every computed-index memory access and every variable-size sink, ask "what
    must be true for this to be safe?" Each answer = a precondition. Cover len-bound, no-overflow, signed,
-   nonnull, lifetime (UAF), lock (race), **field-consistency** (one input field bounding another).
+   nonnull, lifetime (UAF), lock (race), **field-consistency** (one input field bounding another), and
+   **init-complete** (every byte of a buffer written into attacker-readable memory is defined). On *every* write
+   of a struct/buffer into attacker-readable memory (guest RX/CQ/completion ring or descriptor, response/reply/
+   SgCopyTo buffer, datagram, shared page) run **the disclosure lens**: non-zeroing alloc → partial/conditional
+   fill → copy/DMA back = uninitialized host memory disclosed (stack bytes = return addresses → kASLR). Address
+   randomization makes this a first-class objective, not an afterthought — a single leaked kernel pointer unblocks
+   every write primitive.
 3. **Classify**: `self` / `caller` / `unguaranteed`. caller + unguaranteed = attack surface.
-4. **Desk-check**: OOB r/w, int overflow/truncation, off-by-one, UAF, double-free, TOCTOU, uninit, type
-   confusion, error-path cleanup, unchecked returns.
+4. **Desk-check**: OOB r/w, int overflow/truncation, off-by-one, UAF, double-free, TOCTOU, **uninit-disclosure**,
+   type confusion, error-path cleanup, unchecked returns. For **every read/over-read/uninit**, classify the two
+   filters or the finding is not actionable: **leak-back** (does the data reach the attacker, or is it consumed
+   internally and discarded → DoS-not-leak?) and **reachability-origin** (which actor BOTH supplies the input and
+   reads the output: `guest` / `userworld` / `rogue-peer` / `host-local` — a leak readable only by the userworld
+   or host root is *not* a guest escape). Record the defusing **guard** (memset/exact-overwrite/0xFF tail-fill/
+   clamp address) even on a refutation — a sibling path missing it is the next lead.
 The parallel implementation (`review-wf*.js`) fans out one subagent per function (reads pre-extracted
 `hlil/<fn>.hlil.c` + `asm/<fn>.asm`), returning a schema-validated record. Solo works too — same loop.
 
@@ -209,6 +220,29 @@ SELECT func_name,verdict,evidence,guest_path FROM audit WHERE verdict='violable-
 ```
 Every `violable-bug` → **verify against the shipped binary before claiming it** (the verify-before-claim rule).
 Iterate the audit batch-by-batch until every suspected bug is adjudicated.
+
+**Ranked partial follow-up loop.** After broad Stage 3 reaches a large `partial` residue, switch from linear
+batches to small, high-signal follow-up loops. Recompute the normalized histogram after each loop, select the
+next 5 partials most likely to close, extract only their named next-hop functions with
+`bn-audit-prep-functions-bn`, run bounded read-only agents, ingest valid JSON, then re-rank from the updated DB.
+Selection priority:
+- favor partials with a concrete attacker-controlled tuple already named (`checkpoint`/`restore`/`migration`,
+  descriptor/packet/count/length fields, stale pointer+length, or wrap/OOB language);
+- favor cases where the residual is a short list of named helpers, constructors, restore callbacks, dispatch
+  tables, or teardown paths that can be pulled in one manifest;
+- deprioritize generic wrapper residue whose only blocker is broad registration provenance unless the callback
+  set is small and concrete;
+- group targets that share helper context (USB/RemoteUSB, xHCI rings, BusLogic restore, Vigor dispatch) so each
+  manifest is dense and workers do not rediscover the same path;
+- keep the closure standard strict: promote only with a named controlled path and exact violating tuple/race;
+  refute only when constructors, restore helpers, locks/lifetime, and dispatch prove the invariant on every
+  reachable path; otherwise return a narrower partial with exact next functions/addresses.
+Operationally, run one loop as: SQL-rank partials → inspect starting artifacts → extract a focused
+`followupN-functions.json` → create one prompt per target with "up to five trace cycles" → launch read-only
+ephemeral workers at a resource-safe cap → validate `jq` → `ingest_phase2.py` without append so the old row is
+replaced → checkpoint the selected targets, verdict changes, histogram, and resource state. Do not let a
+confirmed adjacent corruption automatically promote another target; require an exact flow into that target's
+own unsafe operation.
 
 ### Graph/locality steering for stripped targets
 For recovered-name BNDBs, run `bn-audit-graph-report` after extraction/scoring and whenever a broad review pass
@@ -267,15 +301,26 @@ ground-truth defect. (tcpip4: prior findings F2/F3/F5 as anchors; vmci: no prior
 
 ## The ledger schema (sqlite — created/migrated by the scripts)
 - **func**(addr, name, size, n_insns, cc, loops, n_mem, n_memidx, n_arith, n_call, n_callind, sink_calls,
-  state_calls, parse_off, **reach, dist, score**) — one row/function: the static metrics + computed
-  reachability/BugScore (the ranking).
+  state_calls, parse_off, **reach, dist, score**, **n_audited**) — one row/function: the static metrics + computed
+  reachability/BugScore (the ranking). `n_audited` tracks how many Stage-3/4 audit passes have been run on this
+  function (incremented by every ingest); use it to prioritize under-analyzed functions and measure diminishing
+  returns (`SELECT name,n_audited,score FROM func WHERE n_audited>3 ORDER BY n_audited DESC`).
 - **edge**(caller, callee) — resolved direct call graph (addresses).
 - **review**(addr, name, reviewed_at, reviewer, verdict, notes) — one Stage-2 review/function.
 - **precondition**(id, func_addr, func_name, text, kind, **klass**, sink, status, attack_note) — the contract
   ledger; `klass` = the safety class (len-bound / no-overflow / lifetime / lock / field-consistency / …).
-- **bug**(id, func_addr, func_name, desc, location, severity, confidence, why, **status**, **bug_class**).
-- **audit**(id, func_name, verdict, evidence, guest_path, residual, next, confidence, **guard**) — Stage-3/4
-  adjudication trail.
+- **bug**(id, func_addr, func_name, desc, location, severity, confidence, why, **status**, **bug_class**,
+  **leak_back**, **disclosure_source**, **reachability**, **guarded_by**) — the last four (disclosure/threat-model
+  lens, idempotent-migrated) let you triage by exfil + actor without re-reading: e.g. the real guest kASLR-leak
+  set is `SELECT func_name FROM bug WHERE leak_back='reaches-attacker' AND reachability='guest' AND
+  disclosure_source IN ('stack','heap','adjacent-object')`; `guarded_by` holds the defusing instruction on a
+  refutation.
+- **audit**(id, func_name, verdict, evidence, guest_path, residual, next, confidence, **guard**,
+  **audit_pass**, **audited_at**) — Stage-3/4 adjudication trail. Each ingest APPENDS a new row (never
+  replaces), so the full analysis history is preserved. `audit_pass` is a per-function sequence number
+  (1, 2, 3, …) tracking how many times this function has been through the audit loop; `audited_at` is the
+  UTC timestamp. Query the latest verdict: `SELECT * FROM audit WHERE func_name=? ORDER BY audit_pass DESC LIMIT 1`.
+  Full history: `SELECT audit_pass,verdict,evidence FROM audit WHERE func_name=? ORDER BY audit_pass`.
 
 **v2 columns (analysis-type aware — added for the Stage-4 lens):**
 - `bug.bug_class` ∈ {`oob`, `int-overflow`, `double-fetch`, `uaf-lifetime`, `uninit-disclosure`, `race`, `type-confusion`, `other`} —
@@ -286,8 +331,8 @@ ground-truth defect. (tcpip4: prior findings F2/F3/F5 as anchors; vmci: no prior
 - `bug.status` walks the **exploitability ladder**: `demonstrated` > `confirmed-latent` > `confirmed-violable`
   > `gated` > `candidate-needs-poc` > `partial` > `refuted` (+ decider-loop terminals
   `exhausted-guest-entry` / `-extsym` / `-depthcap` / `-cycle`). All worklists are plain SQL.
-- Migrations are idempotent (`ALTER TABLE … ADD COLUMN`), so an existing pre-v2 ledger picks up `bug_class`
-  and `guard` on the next ingest.
+- Migrations are idempotent (`ALTER TABLE … ADD COLUMN`), so an existing pre-v2 ledger picks up `bug_class`,
+  `guard`, and the disclosure columns (`leak_back`/`disclosure_source`/`reachability`/`guarded_by`) on the next ingest.
 
 ## Stage 4 — live validation: reachability ≠ exploitability (v2, the key correction)
 The rank→infer→attack pipeline reliably **produces candidates**, but its `confirmed-violable` bar (static: a
@@ -306,6 +351,16 @@ to find the guard*. Most static looseness is defused by one of:
   `TDLEN` is a ~20-bit field, so `(TDLEN>>4)*0x40` can't wrap).
 - **state invariant** — the dangerous count/state is reset on every path that reaches the sink (e.g. vmxnet3
   numRx is reset in `UnmapRQs` on every clean teardown before `ClearMemoryRegions` runs).
+- **full-init / anti-leak** (the disclosure refuter) — a buffer written to attacker-readable memory is fully
+  defined before exposure: a `memset(0)` before populate, an exact-size full overwrite (every byte stored, e.g.
+  the vmxnet3 RCD gen-bit rewrite forces all 16 bytes incl. rssHash←0), or a deliberate `0xFF`/`0x00` tail-fill
+  on the alignment slack (vmci datagram delivery does this explicitly). **Calibration datum (ESXi 8.0.3):** the
+  guest-facing completion paths — vmxnet3 RX desc, PVRDMA CQE (all 8 builders memset 0x40), vmci datagram —
+  are *systematically* hardened this way, so most uninit-disclosure leads on guest device rings refute; the
+  residual real leaks were `host-local` (PsaNvme LOG-SENSE stack over-read) or `userworld`-only
+  (VMCIContext_GetCheckpointState heap) — i.e. the **reachability filter, not the bug filter, is what culls
+  them**. Hunt the *short/error path* and *reserved fields* the fast-path zero-fill may skip, and the
+  copy-length-exceeds-init-source shape (a guest length clamped only against the destination).
 Record the **exact guard (with address)** even on a refutation — it's honest, and a *sibling path missing the
 same guard* is the next lead.
 

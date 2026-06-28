@@ -8,7 +8,10 @@ ROOT=os.environ.get("KAUDIT_ROOT",".")
 recs=json.loads(re.search(r'\[\s*\{.*\}\s*\]',open(sys.argv[1]).read(),re.S).group(0))
 con=sqlite3.connect(f"{ROOT}/kreview.db"); cur=con.cursor()
 cur.execute("CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY, func_name TEXT, verdict TEXT, evidence TEXT, guest_path TEXT, residual TEXT, next TEXT, confidence TEXT, guard TEXT)")
-try: cur.execute("ALTER TABLE audit ADD COLUMN guard TEXT")
+for col in ["guard TEXT", "audit_pass INTEGER", "audited_at TEXT"]:
+    try: cur.execute(f"ALTER TABLE audit ADD COLUMN {col}")
+    except Exception: pass
+try: cur.execute("ALTER TABLE func ADD COLUMN n_audited INTEGER DEFAULT 0")
 except Exception: pass
 allfns=[r[0] for r in cur.execute("SELECT name FROM func")]
 MAP={'confirmed-violable':'confirmed-violable','refuted':'refuted',
@@ -22,9 +25,11 @@ for r in recs:
     v=r.get('verdict','needs-live-poc'); st=MAP.get(v,'candidate-needs-poc'); tally[v]=tally.get(v,0)+1
     prim = r.get('unsafe_primitive') or r.get('oob_primitive') or ''
     ev=f"[DEEP-DIVE {v}] {prim} | impact: {r.get('impact','')} | {r.get('evidence','')}"
-    cur.execute("INSERT INTO audit(func_name,verdict,evidence,guest_path,residual,next,confidence) VALUES(?,?,?,?,?,?,?)",
-      (c, 'deepdive-'+v, ev[:8000], (r.get('guest_input') or '')[:8000], (r.get('external_blocker') or '')[:2000], '', r.get('confidence','')))
+    c_prev = cur.execute("SELECT COALESCE(MAX(audit_pass),0) FROM audit WHERE func_name=?", (c,)).fetchone()[0]
+    cur.execute("INSERT INTO audit(func_name,verdict,evidence,guest_path,residual,next,confidence,audit_pass,audited_at) VALUES(?,?,?,?,?,?,?,?,datetime('now'))",
+      (c, 'deepdive-'+v, ev[:8000], (r.get('guest_input') or '')[:8000], (r.get('external_blocker') or '')[:2000], '', r.get('confidence',''),c_prev+1))
     cur.execute("UPDATE bug SET status=? WHERE func_name=?", (st,c))
+    cur.execute("UPDATE func SET n_audited=COALESCE(n_audited,0)+1 WHERE name=?", (c,))
 con.commit()
 print("deep-dive verdicts:", tally)
 print("bug.status:", dict(cur.execute("SELECT status,COUNT(*) FROM bug GROUP BY status").fetchall()))

@@ -176,8 +176,14 @@ For each ranked function (call-tree order from the roots — a hot root pulls in
      discarded) at review time.
    - the defusing **guard** (memset/exact-overwrite/0xFF tail-fill/clamp/NULL-check addr) even on a refutation —
      a sibling path (other caller, command, device variant) missing it is the next lead.
-The parallel implementation (`review-wf*.js`) fans out one subagent per function (reads pre-extracted
-`hlil/<fn>.hlil.c` + `asm/<fn>.asm`), returning a schema-validated record. Solo works too — same loop.
+The parallel implementation (`review-wf*.js`) fans out the **`binary-audit-reviewer` agent** — one per
+function (reads pre-extracted `hlil/<fn>.hlil.c` + `asm/<fn>.asm`) — which carries the full lens in its
+system prompt (markdown, not a JS template literal), returns a schema-validated record, AND self-captures
+it to `<KAUDIT_ROOT>/review-out/<fn>.json` (crash-resilient; glob those for ingest). `review-wf.js` keeps
+only the `SCHEMA` + the slim per-function task. Solo works too — same loop. **Verify side:** the
+`bn-triage` agent is the adversarial skeptic — fan it out (or run one) to try to REFUTE each surviving
+candidate and record the defusing guard. Both agents are auto-discovered from the plugin's `agents/` dir
+(install/update the plugin so `agentType` resolves in a workflow).
 
 **Combine gate before ingest.** Do not load raw fanout blindly. First run
 `bn-audit-validate-reviews "$KAUDIT_ROOT/reviews/batchNN.combined.json" --workflow "$KAUDIT_ROOT/review-wf-bN.js"`

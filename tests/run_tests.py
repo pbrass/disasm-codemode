@@ -965,17 +965,32 @@ def unit_binary_audit():
     finally:
         shutil.rmtree(td5, ignore_errors=True)
 
-    # disclosure-lens wiring: the first-pass review prompt+schema must carry the lens, and the
-    # profile sink set must match the copy-to-attacker disclosure sinks (so candidates rank up).
-    print("## binary-audit: disclosure lens wiring (no MCP)")
+    # disclosure-lens wiring: review-wf retains the SCHEMA + wires the binary-audit-reviewer agent,
+    # the agent definitions (agents/) carry the lens prose, and the profile sink set must match the
+    # copy-to-attacker disclosure sinks (so candidates rank up).
+    print("## binary-audit: disclosure lens wiring + review/triage agents (no MCP)")
     try:
         import re as _re
         rwf = open(os.path.join(BA_SCRIPTS, "review-wf.js")).read()
         for tok in ("init-complete", "leak_back", "reaches-attacker", "disclosure_source", "reachability", "host-local", "guarded_by",
                     "null-deref", "div-zero", "uninit-use", "type-confusion", "logic", "impact", "host-psod", "nonzero-divisor"):
             uassert("review-wf carries %r" % tok, tok in rwf, "missing from review-wf.js")
-        uassert("review-wf prompt runs the disclosure lens", "disclosure lens" in rwf.lower())
-        uassert("review-wf flags checkpoint/restore as non-guest", "Restore" in rwf and "host-local" in rwf)
+        # review-wf now FANS OUT the binary-audit-reviewer agent; the lens PROSE lives in the agent
+        # system prompt (markdown -> structurally immune to the template-literal break-out bug), while
+        # review-wf retains the SCHEMA (tool-layer enforcement) + a slim per-function task.
+        uassert("review-wf fans out the binary-audit-reviewer agent", "agentType: 'binary-audit-reviewer'" in rwf)
+        uassert("review-wf task passes TARGET/ATTACKER/CONTEXT + OUT", all(t in rwf for t in ("${TARGET}", "${ATTACKER}", "${CONTEXT}", "outpath")))
+        # the lens prose now lives in the auto-discovered agent definitions (agents/)
+        arev = open(os.path.join(ROOT, "agents", "binary-audit-reviewer.md")).read()
+        for tok in ("name: binary-audit-reviewer", "tools:", "disclosure lens", "Restore", "host-local",
+                    "init-complete", "null-deref", "div-zero", "uninit-use", "type-confusion", "logic",
+                    "impact", "leak-back", "reachability", "OUT"):
+            uassert("reviewer agent carries %r" % tok, tok in arev, "missing from binary-audit-reviewer.md")
+        atri = open(os.path.join(ROOT, "agents", "bn-triage.md")).read()
+        for tok in ("name: bn-triage", "guard taxonomy", "copy-then-use", "architecturally-masked",
+                    "clamp-to-produced", "exploitability ladder", "DEMONSTRATED", "CONFIRMED-LATENT",
+                    "IMPACT:", "REACHABILITY:", "leak-back"):
+            uassert("bn-triage carries %r" % tok, tok in atri, "missing from bn-triage.md")
         # regression (2026-06-28): review-wf.js MUST parse as valid JS under the Workflow harness wrapping.
         # The prompt is a backtick-delimited template literal; markdown backticks in the prose (`div`, `*_Alloc`,
         # `*Cpt*`...) previously broke OUT of the string -> the skill's primary launch path,

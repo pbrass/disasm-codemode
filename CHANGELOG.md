@@ -3,6 +3,30 @@
 All notable changes to disasm-codemode. Versioning is semantic (MAJOR.MINOR.PATCH); pre-1.0,
 minor versions may add features and refine interfaces.
 
+## 0.12.0 — 2026-06-28
+
+### Binary-audit: a find→verify **agent pair**, with the review lens relocated into an agent system prompt
+The Stage-2 review calibration (disclosure lens, the 11-class taxonomy, required `impact`, the reachability
++ checkpoint=host-local rule, the honesty guardrails, the i→g re-anchor note) used to live as a ~9 KB **JS
+template literal** inside `review-wf.js` — which is exactly why v0.11.1 had to escape backticks. It now lives
+where prompts belong: a markdown **agent system prompt**.
+- **New agent `binary-audit-reviewer`** (`agents/binary-audit-reviewer.md`, auto-discovered): the Stage-2
+  hunter. Reads one function's pre-extracted HLIL+asm, infers preconditions (self/caller/unguaranteed), and
+  emits the schema-shaped record (verdict + preconditions + suspected_bugs with `bug_class`/`impact`/
+  `reachability`), self-capturing it to `<root>/review-out/<fn>.json`. Reusable standalone via the Agent tool
+  ("review this one function"), not just in the workflow.
+- **`review-wf.js` collapses** to the `SCHEMA` (kept for tool-layer enforcement) + a slim per-function task
+  that fans out the agent via `agentType: 'binary-audit-reviewer'`. The prose lens exists **once**, in
+  markdown → the template-literal break-out bug class is structurally gone (no escaping to get wrong).
+- **`bn-triage` sharpened** (the verify/skeptic half) with the calibration this engagement earned: the **guard
+  taxonomy** (copy-then-use, architecturally-masked input, state-invariant-on-every-path, zero-fill/
+  exact-overwrite/0xFF-tail/clamp-to-produced), required **impact** (observable outcome, not mechanism), the
+  **reachability** taxonomy + checkpoint=host-local, the **exploitability ladder** (demonstrated >
+  confirmed-latent > gated > refuted), the disclosure **leak-back** filter, and a widened `CLASS` set.
+- **Tests**: assert `review-wf.js` wires the agent (and still passes `node --check`), and that both agent
+  definitions carry the lens / guard-taxonomy tokens. SKILL.md documents the find→verify agent pair.
+- **Note**: install/update the plugin so `agentType: 'binary-audit-reviewer'` resolves inside a workflow.
+
 ## 0.11.1 — 2026-06-28
 
 ### Fix: `review-wf.js` failed to parse as JavaScript (binary-audit Workflow launch path)

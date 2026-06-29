@@ -37,25 +37,54 @@ name for `--bv-match`).
 
 ## Method (per candidate)
 1. **Reach the code.** Decompile the function; read the sink call site and its argument expressions.
-2. **Trace the dangerous operand.** For a length/size/index: is it attacker-controlled, and is it
-   bounded before use? Use `bn-callsites --arg N`, `bn-frame` (stack dest size), and the HLIL.
-3. **Find the guard.** Look hard for the check that makes it safe (length clamp, bound, allocation
-   that matches the copy). Most candidates die here.
-4. **Try to REFUTE.** State the strongest reason it is NOT exploitable. Only if you cannot refute it
-   does it survive.
-5. **Confirm reachability** to the degree possible (callers, whether the path is pre-auth/remote).
+2. **Trace the dangerous operand.** For a length/size/index/divisor/pointer: is it attacker-controlled,
+   and is it bounded/validated before use? Use `bn-callsites --arg N`, `bn-frame` (stack dest size),
+   and the HLIL.
+3. **Find the guard — this is where most candidates die.** Look hard for the check or invariant that
+   makes it safe, and name it exactly (with its address). The recurring defusers — the
+   **guard taxonomy** this product family kept hiding behind:
+   - **copy-then-use** — the attacker value was copied into a host struct/local during validated setup;
+     the use reads the host copy, so there is no live double-fetch (THE most common refuter of TOCTOU —
+     a real double-fetch lives in the live datapath ring/descriptor reads, not one-time-copied setup).
+   - **architecturally-masked input** — the field/register cannot hold the value the bug needs (e.g. a
+     ~20-bit length field can't reach the wrap).
+   - **state-invariant-on-every-path** — the dangerous count/state is reset or clamped on every path
+     that reaches the sink (e.g. a count zeroed in teardown before the sink runs).
+   - **zero-fill / exact-overwrite / 0xFF-tail-fill / clamp-to-produced** — for a disclosure: the buffer
+     is memset, fully field-written, deliberately tail-padded, or the copy length is clamped to the
+     source's produced byte count, so no uninitialized/over-read bytes reach the attacker.
+4. **For a read / over-read / uninit candidate, apply the leak-back filter.** Does the disclosed data
+   actually reach the attacker (`reaches-attacker`), or is it consumed internally and discarded (drives
+   only a checksum/length/validation decision)? Discarded → at most a fault/DoS, not an info-leak.
+5. **Try to REFUTE.** State the strongest reason it is NOT exploitable. Only if you cannot refute it
+   does it survive — and even then, record the guard you *did* find: a sibling path missing the same
+   guard is the next lead, and a confidently-refuted candidate with the guard cited is a real deliverable.
+6. **Pin the threat model.** Which actor BOTH supplies the input AND reads/triggers the output:
+   `guest` / `userworld` / `rogue-peer` / `host-local`? Confirm reachability (callers, pre-auth/remote).
+   Functions named `*Cpt*`/`*Checkpoint*`/`*Restore*`/`*Load*`/`*SaveState*` are the forged-checkpoint/
+   vMotion path = `host-local`/migration, NOT a guest escape — don't inflate them.
 
 ## Output (structured, concise)
 For each candidate:
 ```
 FUNCTION / ADDR:
-CLASS:            (int-overflow / heap-mismatch / stack-overflow / format-string / double-fetch / ...)
-VERDICT:          REAL | REFUTED | NEEDS-DYNAMIC
+CLASS:            (oob / int-overflow / double-fetch / uaf-lifetime / uninit-disclosure / uninit-use /
+                  null-deref / div-zero / type-confusion / race / logic / other)
+VERDICT:          DEMONSTRATED | CONFIRMED-LATENT | GATED | REAL | REFUTED | NEEDS-DYNAMIC
+IMPACT:           the concrete attacker-OBSERVABLE outcome, NOT the mechanism — host-psod / host-rce /
+                  host-mem-corruption / guest-readable-leak / vmx-rce / vmx-crash / privesc / dos-other /
+                  none-or-guarded
+REACHABILITY:     guest / userworld / rogue-peer / host-local  (+ pre-auth? remote? requires a caller?)
 WHY:              the operand/guard reasoning, with the decisive HLIL line(s) quoted
-SEVERITY:         (if REAL) + reachability (pre-auth? remote? requires a specific caller?)
-REPRO SKETCH:     (if REAL) the input/condition that triggers it
+GUARD:            the exact defusing check (+addr) — REQUIRED on REFUTED / GATED / CONFIRMED-LATENT
+REPRO SKETCH:     (if it survives) the input/condition that triggers it
 ```
-Be specific and cite the evidence (the HLIL line, the missing/insufficient check). Prefer "REFUTED
-because <guard>" over a vague maybe. If you genuinely cannot tell statically, say NEEDS-DYNAMIC and
-name the exact test. Do not inflate severity, and do not claim a privileged-op impact you have not
-traced to a real sink/consumer.
+**Grade on the exploitability ladder, not a binary:** **DEMONSTRATED** (a live PSOD/leak/repro) >
+**CONFIRMED-LATENT** (the precondition is reachable but a runtime guard closes the window) > **GATED**
+(a real defect that needs non-default config or a different threat model) > **REFUTED**. Use **REAL**
+only for a statically-confirmed-violable bug you have not run, and **NEEDS-DYNAMIC** when you cannot
+decide statically — then name the exact test. Be specific and cite the evidence (the HLIL line, the
+missing/insufficient check). Prefer "REFUTED because <guard@addr>" over a vague maybe. State `IMPACT` as
+what the attacker ACTUALLY GETS; do not inflate severity or claim a privileged-op impact you have not
+traced to a real sink/consumer. A confidently-refuted candidate with the guard recorded is a real
+deliverable, and a sibling path missing that guard is the next lead.

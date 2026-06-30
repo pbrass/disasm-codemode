@@ -17,6 +17,7 @@ HUNT = os.path.join(ROOT, "skills", "bn-hunt", "scripts")
 BNJA = os.path.join(ROOT, "skills", "binary-ninja", "scripts")
 GHIDRA = os.path.join(ROOT, "skills", "ghidra", "scripts")
 SYMBOLICATE = os.path.join(ROOT, "skills", "symbolicate", "scripts")
+SBOMKB = os.path.join(ROOT, "skills", "sbom-kb")
 PY = sys.executable
 MCP_URL = os.environ.get("BINJA_MCP_URL", "http://127.0.0.1:42069").rstrip("/")
 MCP_KEY = os.environ.get("BINJA_MCP_KEY", "binja-codemode-local")
@@ -1195,6 +1196,114 @@ def test_re_sync_live():
         shutil.rmtree(td, ignore_errors=True)
 
 
+def test_sbom_kb():
+    """sbom-kb skill: schema, build, views, query helper — no network/BN needed."""
+    import tempfile, sqlite3, shutil
+    print("\n--- sbom-kb tests ---")
+    td = tempfile.mkdtemp(prefix="sbomkb_test_")
+    schema = os.path.join(SBOMKB, "schema.sql")
+    seeds = os.path.join(SBOMKB, "seeds")
+    build_script = os.path.join(SBOMKB, "scripts", "build_sbom.py")
+    resolve_script = os.path.join(SBOMKB, "scripts", "resolve_and_classify.py")
+    q_sh = os.path.join(SBOMKB, "scripts", "q.sh")
+    try:
+        # 1. schema loads without error
+        db = os.path.join(td, "test.db")
+        con = sqlite3.connect(db)
+        con.executescript(open(schema).read())
+        tables = [r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+        for t in ["host", "binary", "library", "link", "package", "cve", "analysis",
+                   "upstream_fix", "github_review", "residual_check", "proc_map", "artifact"]:
+            uassert(f"sbom: schema has table '{t}'", t in tables)
+        views = [r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='view'").fetchall()]
+        for v in ["v_preauth_ndays", "v_patched_packages", "v_findings", "v_todo",
+                   "v_completeness", "v_binary_rollup", "v_github_coverage", "v_dlopen_loads"]:
+            uassert(f"sbom: schema has view '{v}'", v in views)
+
+        # 2. empty DB views return 0 rows without error
+        for v in views:
+            rows = con.execute(f"SELECT * FROM {v}").fetchall()
+            uassert(f"sbom: empty {v} is queryable", isinstance(rows, list))
+
+        # 3. insert test data and verify views
+        con.execute("INSERT INTO binary(path,name,role,listen_ports,reachability,work_status) "
+                    "VALUES('/usr/sbin/testd','testd','test daemon','443','preauth-remote','todo')")
+        con.execute("INSERT INTO library(soname,path,version,upstream,audit_status) "
+                    "VALUES('libfoo.so.1','/usr/lib/libfoo.so.1','1.2.3','libfoo','version-resolved')")
+        con.execute("INSERT INTO link(binary_path,library_soname,link_type) "
+                    "VALUES('/usr/sbin/testd','libfoo.so.1','dynamic')")
+        con.execute("INSERT INTO cve(cve_id,component,component_type,severity,present_on_fleet,triage_status) "
+                    "VALUES('CVE-2099-0001','libfoo.so.1','library','High',1,'todo')")
+        con.execute("INSERT INTO analysis(cve_id,component,reachable,exploitability,verdict,status) "
+                    "VALUES('CVE-2099-0001','libfoo.so.1','preauth-remote','plausible','live n-day','open')")
+        con.commit()
+
+        ndays = con.execute("SELECT * FROM v_preauth_ndays").fetchall()
+        uassert("sbom: v_preauth_ndays returns test CVE", len(ndays) == 1 and ndays[0][0] == "CVE-2099-0001")
+
+        rollup = con.execute("SELECT * FROM v_binary_rollup").fetchall()
+        uassert("sbom: v_binary_rollup has testd with 1 dep", len(rollup) == 1 and rollup[0][3] == 1)
+
+        todo = con.execute("SELECT * FROM v_todo").fetchall()
+        uassert("sbom: v_todo lists open items", len(todo) >= 3)
+
+        comp = con.execute("SELECT * FROM v_completeness").fetchall()
+        uassert("sbom: v_completeness has 4 levels", len(comp) == 4)
+
+        findings = con.execute("SELECT * FROM v_findings").fetchall()
+        uassert("sbom: v_findings returns the test finding", len(findings) == 1)
+
+        # 4. build_sbom.py runs with no config (produces empty DB)
+        db2 = os.path.join(td, "built.db")
+        env = dict(os.environ, SBOM_DB=db2, SBOM_SEEDS=seeds)
+        rc4, o4, e4 = sh([PY, build_script], timeout=30)
+        # run with correct env
+        p4 = subprocess.run([PY, build_script], capture_output=True, text=True, timeout=30,
+                            env=env)
+        blob4 = p4.stdout + "\n" + p4.stderr
+        probs4 = []
+        if p4.returncode != 0: probs4.append("rc=%d" % p4.returncode)
+        for pat in [r"\[packages\] skipped", r"\[graph\].*binaries", r"\[seeds\]"]:
+            if not re.search(pat, blob4): probs4.append("missing /%s/" % pat)
+        if probs4:
+            bad("sbom: build_sbom.py (no-host)", "; ".join(probs4), blob4[:500])
+        else:
+            ok("sbom: build_sbom.py (no-host)")
+
+        # verify the built DB has the schema
+        con2 = sqlite3.connect(db2)
+        t2 = [r[0] for r in con2.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+        uassert("sbom: built DB has tables", "binary" in t2 and "cve" in t2)
+        con2.close()
+
+        # 5. resolve_and_classify.py refuses without SBOM_HOST (expected)
+        expect("sbom: resolve_and_classify requires host",
+               [PY, resolve_script], rc=None,
+               has=[r"by audit_status"])
+
+        # 6. q.sh runs against a DB
+        expect("sbom: q.sh money query", ["bash", q_sh], rc=None)
+
+        # 7. no VMware-specific strings in any skill file
+        for dirpath, _, filenames in os.walk(SBOMKB):
+            if "__pycache__" in dirpath:
+                continue
+            for fn in filenames:
+                if fn.endswith((".py", ".sql", ".md", ".sh")):
+                    content = open(os.path.join(dirpath, fn)).read()
+                    for leak in ["vmware", "vcenter", "vcsa", "vmdird", "vmcad", "vmafdd",
+                                 "rhttpproxy", "vpxd", "likewise", "photon", "esxi", "vsphere",
+                                 "25197330", "25413364", "192.168.0", "phil_notes"]:
+                        uassert(f"sbom: no '{leak}' in {fn}",
+                                leak not in content.lower(),
+                                f"found '{leak}' in {os.path.join(dirpath, fn)}")
+        con.close()
+    except Exception as e:
+        bad("sbom-kb suite", repr(e))
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
 def main():
     print("=== disasm-codemode test suite ===")
     print("[*] building fixtures ...")
@@ -1209,6 +1318,7 @@ def main():
     test_security()             # tainted-output handling (unit always; evil-binary integration needs caps/MCP)
     unit_binary_audit()         # always (no BN): ledger->comment builder + ingest caps
     unit_symbolicate()          # always (no BN): sidecar naming + split/combine/ingest helpers
+    test_sbom_kb()              # always (no BN/network): schema, build, views, leak-check
     have_caps = True
     try:
         import capstone, elftools  # noqa

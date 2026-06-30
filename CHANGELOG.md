@@ -3,6 +3,25 @@
 All notable changes to disasm-codemode. Versioning is semantic (MAJOR.MINOR.PATCH); pre-1.0,
 minor versions may add features and refine interfaces.
 
+## 0.13.0 — 2026-06-29
+
+### New skill: `sbom-kb` — SBOM + vulnerability knowledge base
+Promoted from an engagement-internal tool into a reusable, vendor-agnostic skill. Builds and queries
+a SQLite KB for bundled-component / patch-diff / reachability audits of any appliance or fleet that
+wraps outdated upstream OSS.
+
+- **Schema** (`schema.sql`): `host`, `binary`, `library`, `link`, `package`, `cve`, `analysis`,
+  `upstream_fix`, `github_review`, `residual_check`, `proc_map`, `artifact` — plus 7 convenience
+  views (`v_preauth_ndays`, `v_patched_packages`, `v_findings`, `v_todo`, `v_completeness`,
+  `v_binary_rollup`, `v_github_coverage`).
+- **Build scripts** (all env-var-driven, no hardcoded targets): `build_sbom.py` (package diff + ldd
+  graph + seeds), `resolve_and_classify.py` (real upstream versions from `.rodata` build-path
+  strings + vendor-internal classification), `scan_static_deps.py` (statically-vendored OSS in
+  binaries AND shared libraries — the ldd-invisible surface), `collect_proc_maps.py` (runtime
+  `/proc/maps` → dlopen loads), `scan_dlopen_callers.py` (which files import `dlopen`).
+- **Query cookbook** (`queries.md`): headline views, ad-hoc recipes, tips.
+- All VMware/vCenter engagement data stripped; ships with an example seed and empty reference dir.
+
 ## 0.12.0 — 2026-06-28
 
 ### Binary-audit: a find→verify **agent pair**, with the review lens relocated into an agent system prompt

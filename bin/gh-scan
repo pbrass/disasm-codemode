@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# disasm-codemode wrapper -> skills/ghidra/scripts/scan.py  (auto-on-PATH when the plugin is installed)
+root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}"
+exec python3 "$root/skills/ghidra/scripts/scan.py" "$@"

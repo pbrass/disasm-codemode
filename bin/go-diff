@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# disasm-codemode wrapper -> skills/go-re/gore diff  (RE stripped Go binaries via pclntab; BN/Ghidra-independent)
+root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}"
+exec "$root/skills/go-re/gore" diff "$@"

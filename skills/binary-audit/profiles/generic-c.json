@@ -1,0 +1,9 @@
+{
+  "name": "generic-c",
+  "description": "Generic C binary: parser/IO/ioctl entry points, libc + alloc sinks. Tune seed_regex to your attacker-input handlers.",
+  "sink_regex": "(memcpy|memmove|memset|bcopy|strcpy|strncpy|strcat|strlcpy|stpcpy|sprintf|vsprintf|snprintf|malloc|calloc|realloc|alloca|kmalloc|kcalloc|vmalloc|copy_from_user|copy_to_user|get_user|put_user|copyin|copyout)",
+  "state_regex": "(free|kfree|vfree|kmem_cache_free|_destroy|_release|_put\\b|refcount|atomic_|_lock|_unlock|mutex_|spin_lock|spin_unlock|down\\b|up\\b|sema)",
+  "seed_regex": "(recv|read|parse|_input|decode|deserialize|unmarshal|demux|ioctl|_handle|handler|dispatch|process|_rx|from_user|do_msg|on_request|_cmd)",
+  "weights": {"cc":1.0,"n_memidx":1.2,"sink":1.0,"parse":0.7,"loops":0.6,"state":0.5,"n_arith":0.4,"n_insns":0.3,"fanin":0.5},
+  "gamma": 0.72, "floor": 0.03
+}

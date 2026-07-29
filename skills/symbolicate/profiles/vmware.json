@@ -1,0 +1,15 @@
+{
+  "name": "vmware",
+  "desc": "VMware userworld/monitor binaries (vmx, vmkernel-adjacent) — heavy LOG/ASSERT instrumentation with 'Identifier: message' prefixes; CamelCase / Foo_Bar naming.",
+  "naming_convention": "VMware C: ModuleCamelCase or Module_Verb (e.g. Vmxnet3DoTx, OvhdMem_PowerOn, PCIBus_RegisterDevice). Prefer the module prefix seen in the function's own log strings.",
+  "log_prefix_re": "^([A-Z][A-Za-z0-9]{2,}(?:_[A-Za-z0-9]+)*): ",
+  "exact_name_re": "^[A-Z][A-Za-z0-9]+_[A-Za-z0-9_]+$",
+  "domain_tags": [
+    "Vmxnet3", "E1000", "Vlance", "Vnet", "PVRDMA", "Vrdma", "USB", "XHCI", "EHCI", "UHCI",
+    "SCSI", "Pvscsi", "NVMe", "AHCI", "SVGA", "MKS", "Backdoor", "Rpci", "GuestRpc", "TCLO",
+    "PCIBus", "Chipset", "VMMem", "OvhdMem", "MemSched", "FSR", "Monitor", "Vcpu", "Tools",
+    "Serial", "Parallel", "Floppy", "Cdrom", "Sound", "HGFS", "Hgfs", "DnD", "Unity"
+  ],
+  "name_stop_prefixes": ["sub_", "j_sub_", "nullsub_", "_init", "_fini"],
+  "junk_string_re": "^[A-Za-z0-9+/]{4,6}[HL]?$"
+}

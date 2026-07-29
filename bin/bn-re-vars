@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# disasm-codemode wrapper -> skills/binary-ninja/scripts/re_vars.py  (auto-on-PATH when the plugin is installed)
+root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}"
+exec python3 "$root/skills/binary-ninja/scripts/re_vars.py" "$@"

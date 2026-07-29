@@ -1,0 +1,4 @@
+# working build output (the prebuilt KB is reference/sbom.db if present, which IS tracked)
+/sbom.db
+__pycache__/
+*.pyc

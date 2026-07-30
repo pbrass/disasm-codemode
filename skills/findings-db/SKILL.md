@@ -59,6 +59,7 @@ Key ideas:
 ## Commands
 ```bash
 fdb init                                        # create/upgrade the schema (idempotent)
+fdb new-target --slug S --vendor V --build B    # register a target + first build, print the flow
 fdb load spec.json                              # idempotent bulk upsert -- the backfill path
 fdb resolve P4-4                                # legacy signifier -> canonical finding
 fdb register-ledger --path K --kind audit [--target T --build B --component C]
@@ -71,6 +72,32 @@ fdb stats                                       # row counts, yield by target x 
 fdb query "SELECT ..." [--json] [--write]       # raw SQL; refuses non-SELECT without --write
 ```
 DB path: `--db`, else `$FDB_DB`, else `./assessment.db`. Stdlib only, no network.
+
+## Starting a new appliance
+```bash
+fdb init
+fdb new-target --slug gateway-vpx --vendor examplecorp --product "Gateway VPX" \
+               --kind appliance --build 14125 --version 14.1-25.53 \
+               --obtainability "free trial ISO"
+```
+Then follow the five steps it prints — they are the same five every time, with this target's slug
+and build already substituted in:
+
+1. **Inventory** the image: one `component` row per binary you intend to audit.
+2. **Audit** a component with `binary-audit`, exporting `KAUDIT_TARGET`/`KAUDIT_BUILD`/
+   `KAUDIT_COMPONENT` so the ledger records its own scope. *Calibrate the ranking before trusting
+   it.*
+3. **Promote**: `register-ledger` (no scope flags needed) → `import-audit` → check `v_orphans`.
+4. **Sweep** the bundled components: `import-sbom` for this build.
+5. **Load** the findings by spec, then `fdb stats`.
+
+The first build of a new target is marked `is_fleet_current` unless you pass `--not-fleet-current`
+— severity framing reads that column, so leaving it unset quietly under-rates everything found on
+it. `new-target` writes only rows a spec could write, and is idempotent; its real job is that a new
+appliance has **one** entry point that ends by naming the next command. The reason to bother:
+findings from a new target then come out of the same views (`v_method_yield`, `v_findings`,
+`v_disclosure_queue`) as every existing one. Comparable cross-target numbers are the deliverable;
+a second pile of markdown is the failure mode.
 
 ## The load spec
 One JSON file, sections applied in dependency order, every section optional. Parents are

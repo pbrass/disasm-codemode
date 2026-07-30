@@ -618,6 +618,77 @@ def cmd_import_sbom(args):
     return 0
 
 
+# -------------------------------------------------------------------- bootstrap
+
+NEXT_STEPS = """
+next steps for {slug}{build_note}
+
+  1. inventory the image -- one component row per binary you intend to audit:
+     fdb query --write "INSERT INTO component(build_id, name, path, kind)
+       SELECT id, 'authd', '/usr/sbin/authd', 'userworld' FROM build
+        WHERE target_id=(SELECT id FROM target WHERE slug='{slug}') AND build='{build}'"
+
+  2. audit a component, with the ledger recording its own scope:
+     export KAUDIT_TARGET={slug} KAUDIT_BUILD={build} KAUDIT_COMPONENT=<name>
+     python3 <binary-audit>/scripts/extract.py $KAUDIT_BIN audit/<name>/kreview.db profile.json
+     python3 <binary-audit>/scripts/score.py audit/<name>/kreview.db profile.json
+     # CALIBRATE before trusting the ranking: a known bug (or a known entry handler)
+     # must land in the top percentile.
+
+  3. promote what the audit adjudicated -- no scope flags needed, the ledger says:
+     fdb register-ledger --path audit/<name>/kreview.db --kind audit
+     fdb import-audit audit/<name>/kreview.db
+     fdb query "SELECT * FROM v_orphans"     # adjudicated real, never promoted
+
+  4. the bundled-component sweep, if you have an SBOM KB for this image:
+     fdb import-sbom sbom.db --target {slug} --build {build}
+
+  5. findings themselves go in by spec, so they stay diffable and re-runnable:
+     # spec sections: findings / affects / evidence / disclosures
+     fdb load spec/01-{slug}.json
+     fdb stats                               # yield by target x method
+
+  The point of steps 2-4 is that this target's numbers come out of the same views as
+  every other target's. Comparable yield is the deliverable; a second pile of markdown
+  is the failure mode.
+"""
+
+
+def cmd_new_target(args):
+    """Register a target (and optionally its first build) and print the flow.
+
+    Deliberately thin: it writes two rows any `load` spec could write. Its value is
+    that starting an appliance from zero has ONE documented entry point which ends by
+    naming the next command, so a new target lands in the same views as the old ones
+    instead of accreting its own notes tree.
+    """
+    con = connect(args)
+    if args.engagement:
+        _upsert(con, "engagement", ["slug"], {"slug": args.engagement})
+    row = {"slug": args.slug, "vendor": args.vendor, "product": args.product,
+           "kind": args.kind, "obtainability": args.obtainability, "notes": args.notes}
+    tid, verb = _upsert(con, "target", ["slug"],
+                        {k: v for k, v in row.items() if v is not None})
+    print(f"[fdb] target {verb}: id={tid} {args.slug}")
+    if args.build:
+        b = {"target_id": tid, "build": args.build, "version": args.version,
+             "marketing_name": args.marketing_name, "image_path": args.image_path,
+             # the first build of a new target is the one in scope until told otherwise;
+             # severity framing reads is_fleet_current, so leaving it 0 quietly
+             # under-rates everything found on it
+             "is_fleet_current": 0 if args.not_fleet_current else 1}
+        bid, bverb = _upsert(con, "build", ["target_id", "build"],
+                             {k: v for k, v in b.items() if v is not None})
+        print(f"[fdb] build {bverb}: id={bid} {args.build}"
+              f"{'' if args.not_fleet_current else ' (fleet-current)'}")
+    con.commit()
+    print(NEXT_STEPS.format(
+        slug=args.slug, build=args.build or "<build>",
+        build_note="" if args.build else
+        "\n  (no --build given -- add one before auditing; findings hang off a build)"))
+    return 0
+
+
 # ---------------------------------------------------------------------- queries
 
 def cmd_resolve(args):
@@ -734,6 +805,23 @@ def main(argv=None):
 
     p = sub.add_parser("load", help="idempotent bulk upsert from a JSON spec")
     p.add_argument("spec"); p.set_defaults(fn=cmd_load)
+
+    p = sub.add_parser("new-target", help="register a target + first build, and "
+                                          "print the starting-an-appliance flow")
+    p.add_argument("--slug", required=True, help="short handle, e.g. gateway-vpx")
+    p.add_argument("--vendor"); p.add_argument("--product")
+    p.add_argument("--kind", choices=["hypervisor", "appliance", "nas", "firewall",
+                                      "bmc", "controller", "container-platform",
+                                      "other"], default="appliance")
+    p.add_argument("--build", help="first build number (the one you have an image of)")
+    p.add_argument("--version"); p.add_argument("--marketing-name")
+    p.add_argument("--image-path")
+    p.add_argument("--not-fleet-current", action="store_true",
+                   help="this build is NOT the in-scope one (default: it is)")
+    p.add_argument("--obtainability", help="how an image is acquired (free ISO/trial/portal)")
+    p.add_argument("--engagement", help="engagement slug to create if absent")
+    p.add_argument("--notes")
+    p.set_defaults(fn=cmd_new_target)
 
     p = sub.add_parser("register-ledger", help="register a producer DB")
     p.add_argument("--path", required=True)

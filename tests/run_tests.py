@@ -1645,6 +1645,45 @@ def test_findings_db():
         expect("fdb: a re-register with no flags keeps (and does not disown) the scope",
                [PY, fdb, "--db", db, "register-ledger", "--path", led,
                 "--kind", "audit"], rc=0, nothas=[r"promote unscoped"])
+
+        # 14. new-target bootstrap: the one documented entry point for an appliance.
+        #     It must be idempotent (it is a spec-equivalent write) and it must end by
+        #     naming the next command with this target's own slug/build substituted --
+        #     a generic blurb is what sends people back to a private notes tree.
+        nt = os.path.join(td, "new.db")
+        sh([PY, fdb, "--db", nt, "init"])
+        expect("fdb: new-target registers target + first build",
+               [PY, fdb, "--db", nt, "new-target", "--slug", "gateway-vpx",
+                "--vendor", "examplecorp", "--build", "14125",
+                "--kind", "appliance"], rc=0,
+               has=[r"target inserted", r"build inserted", r"fleet-current",
+                    r"KAUDIT_TARGET=gateway-vpx KAUDIT_BUILD=14125",
+                    r"import-sbom sbom\.db --target gateway-vpx --build 14125"])
+        expect("fdb: new-target is idempotent",
+               [PY, fdb, "--db", nt, "new-target", "--slug", "gateway-vpx",
+                "--vendor", "examplecorp", "--build", "14125"], rc=0,
+               has=[r"target unchanged", r"build unchanged"])
+        nc = sqlite3.connect(nt)
+        uassert("fdb: new-target wrote exactly one target and one build",
+                nc.execute("SELECT count(*) FROM target").fetchone()[0] == 1
+                and nc.execute("SELECT count(*) FROM build").fetchone()[0] == 1)
+        uassert("fdb: the first build is marked fleet-current",
+                nc.execute("SELECT is_fleet_current FROM build").fetchone()[0] == 1)
+        # a --build-less bootstrap is legal (image not pulled yet) but must say so,
+        # since a finding cannot be recorded as affecting nothing
+        expect("fdb: new-target without a build says a build is still needed",
+               [PY, fdb, "--db", nt, "new-target", "--slug", "other-vpx"], rc=0,
+               has=[r"no --build given", r"<build>"])
+        uassert("fdb: the build-less target created no build row",
+                nc.execute("SELECT count(*) FROM build").fetchone()[0] == 1)
+        expect("fdb: new-target --not-fleet-current is honoured",
+               [PY, fdb, "--db", nt, "new-target", "--slug", "gateway-vpx",
+                "--build", "14126", "--not-fleet-current"], rc=0,
+               nothas=[r"fleet-current"])
+        uassert("fdb: the second build is not fleet-current",
+                nc.execute("SELECT is_fleet_current FROM build WHERE build='14126'"
+                           ).fetchone()[0] == 0)
+        nc.close()
         con.close()
     except Exception as e:
         bad("findings-db suite", repr(e))

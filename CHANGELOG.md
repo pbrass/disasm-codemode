@@ -5,6 +5,17 @@ minor versions may add features and refine interfaces.
 
 ## 0.15.0 — 2026-07-30
 
+### `fdb new-target` — one entry point for a new appliance
+`fdb new-target --slug gateway-vpx --vendor examplecorp --build 14125` registers the target and its
+first build (marked `is_fleet_current` unless `--not-fleet-current`, because severity framing reads
+that column and leaving it unset under-rates everything found on the build you actually have), then
+prints the five-step flow with this target's slug and build already substituted: inventory
+components → audit with the scope env vars set → register/import the ledger and check `v_orphans` →
+sweep the SBOM → load findings by spec. It writes only rows a `load` spec could write and is
+idempotent; the value is that a new target has one documented starting point that ends by naming the
+next command, so its findings come out of the same views as every existing target's. Comparable
+cross-target yield is the point; a second pile of markdown is the failure mode.
+
 ### A ledger now says what it audited
 `kreview.db` recorded a great deal about *how* an audit went and nothing at all about **what was
 audited**. The directory path was the only evidence — a ledger at `audit/vmci/kreview.db` meant "the

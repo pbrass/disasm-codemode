@@ -20,8 +20,8 @@ import argparse, json, os, sqlite3, sys, hashlib, datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCHEMA = os.path.join(os.path.dirname(HERE), "schema.sql")
-SCHEMA_REV = 3
-VERSION = "0.3.0"
+SCHEMA_REV = 4
+VERSION = "0.4.0"
 
 
 def now():
@@ -49,6 +49,7 @@ def connect(args, create=False):
 # an explicit migration step.
 ADDED_COLUMNS = [
     (2, "ledger_bug", "verdict_raw", "TEXT"),
+    (4, "disclosure", "excluded_why", "TEXT"),
 ]
 
 

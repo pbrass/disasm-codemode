@@ -170,6 +170,11 @@ CREATE TABLE IF NOT EXISTS disclosure(
   embargo_until TEXT,
   advisory_ref TEXT,
   last_correspondence TEXT,
+  -- Set when we have decided NOT to send this to the vendor, with the reason.
+  -- vendor_status describes the VENDOR's state and so cannot express our own
+  -- decision: without this, "deliberately excluded" and "nobody has looked at it
+  -- yet" are both 'not-submitted', and the second one hides inside the first.
+  excluded_why TEXT,
   notes TEXT);
 
 -- ------------------------------------------------- Layer E: producer ledger links
@@ -381,13 +386,35 @@ CREATE VIEW v_alias AS
 SELECT a.alias, a.namespace, f.canonical_id, f.slug, f.title, f.status
   FROM finding_alias a JOIN finding f ON f.id = a.finding_id;
 
--- Findings worth reporting that have no disclosure record yet.
+-- Findings we have decided to report and have not sent yet.
 DROP VIEW IF EXISTS v_disclosure_queue;
 CREATE VIEW v_disclosure_queue AS
-SELECT f.canonical_id, f.slug, f.title, f.severity, f.status, f.novelty
+SELECT f.canonical_id, f.slug, f.title, f.severity, f.status, f.novelty,
+       d.vendor, d.vendor_status
+  FROM finding f
+  JOIN disclosure d ON d.finding_id = f.id
+ WHERE d.vendor_status = 'not-submitted'
+   AND d.excluded_why IS NULL
+ ORDER BY f.severity, f.canonical_id;
+
+-- The disclosure-side orphan: a finding whose grade says report it, with NO
+-- disclosure record at all -- neither queued nor excluded. Nobody decided.
+--
+-- This is the same failure as v_orphans and v_sbom_orphans one step further
+-- downstream: the finding is written up and confirmed, and simply never reaches
+-- the vendor because no list says it should. An excluded_why -- even "n-day,
+-- reported as a patch gap instead" -- takes a row off this list; being ignored
+-- does not.
+DROP VIEW IF EXISTS v_disclosure_gaps;
+CREATE VIEW v_disclosure_gaps AS
+SELECT f.canonical_id, f.slug, f.title, f.severity, f.status, f.novelty,
+       f.attacker, f.impact, f.doc_path
   FROM finding f
   LEFT JOIN disclosure d ON d.finding_id = f.id
- WHERE f.status IN ('demonstrated','static-confirmed','violable')
+ WHERE d.id IS NULL
+   AND f.status IN ('demonstrated','static-confirmed','violable')
    AND f.novelty IN ('0day','nday')
-   AND (d.id IS NULL OR d.vendor_status = 'not-submitted')
- ORDER BY f.severity, f.canonical_id;
+ ORDER BY (f.status = 'demonstrated') DESC,
+          CASE f.severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1
+                          WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END,
+          f.slug;

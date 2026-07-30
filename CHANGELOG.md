@@ -3,6 +3,39 @@
 All notable changes to disasm-codemode. Versioning is semantic (MAJOR.MINOR.PATCH); pre-1.0,
 minor versions may add features and refine interfaces.
 
+## 0.14.0 — 2026-07-29
+
+### New skill: `findings-db` — one finding store per assessment
+The other skills each produce their own store (`kreview.db` per audited binary, `sbom.db` per
+product, plus markdown trackers), and nothing joins them. On a long assessment that costs three
+specific things: ID namespaces collide and two workstreams turn out to have found the same bug;
+"which builds is this present on, and how do we know" is answered by grepping prose; and a
+producer ledger can adjudicate a bug `violable-bug` that nobody ever writes up.
+
+- **Schema** (`schema.sql`), five layers: scope (`engagement`/`target`/`build`/`component`),
+  findings (`finding` + `finding_alias`/`finding_affects`/`finding_location`), evidence and
+  `provenance`, `disclosure`, and producer links (`ledger`/`ledger_bug`). Every taxonomy column
+  is CHECK-constrained — free-text status/severity is exactly what drifted across the stores this
+  replaces.
+- **`finding_affects`** is per (finding, build, component) with a `state` and a `confirmed_how`,
+  so an advisory's "Affected Products" block is `SELECT * FROM v_advisory_affects`, not a
+  re-derivation. `untested` is a first-class state.
+- **`finding_alias`** keeps every legacy signifier resolvable (`fdb resolve <old-id>`).
+  Renumbering breaks vendor correspondence already sent; aliases are cheap.
+- **`fdb` CLI**: `init`, `load` (idempotent bulk upsert from a JSON spec), `register-ledger`,
+  `import-audit`, `import-sbom`, `resolve`, `stats`, `query`. Stdlib only, no network; `query`
+  refuses a non-SELECT without `--write`.
+- **Producer ledgers are referenced, not absorbed.** `import-audit` reads a binary-audit ledger
+  read-only, tolerates schema drift via `PRAGMA table_info`, and takes the *strongest*
+  adjudication per function (`violable-bug > partial > uncertain > established-safe`) rather than
+  whichever verdict landed last.
+- **Views**: `v_findings`, `v_advisory_affects`, `v_method_yield` (findings per target × discovery
+  method — the cross-target comparison), `v_funnel`, `v_orphans` (adjudicated-real ledger bugs
+  with no finding *and* no disposition — the "did we drop one?" check), `v_alias`,
+  `v_disclosure_queue`.
+- 58 new tests, including that a second `load`/`import-audit` of unchanged input writes zero rows,
+  and a negative case proving that check is not vacuous.
+
 ## 0.13.1 — 2026-07-29
 
 ### Disclosure hygiene: neutral examples + repo-wide gate

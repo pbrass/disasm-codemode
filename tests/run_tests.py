@@ -18,6 +18,7 @@ BNJA = os.path.join(ROOT, "skills", "binary-ninja", "scripts")
 GHIDRA = os.path.join(ROOT, "skills", "ghidra", "scripts")
 SYMBOLICATE = os.path.join(ROOT, "skills", "symbolicate", "scripts")
 SBOMKB = os.path.join(ROOT, "skills", "sbom-kb")
+FDB = os.path.join(ROOT, "skills", "findings-db")
 PY = sys.executable
 MCP_URL = os.environ.get("BINJA_MCP_URL", "http://127.0.0.1:42069").rstrip("/")
 MCP_KEY = os.environ.get("BINJA_MCP_KEY", "binja-codemode-local")
@@ -416,7 +417,8 @@ def test_packaging():
                 "bn-sym-prep-second", "bn-sym-review-protos", "bn-sym-slice-protos",
                 "bn-sym-split",
                 "gh-decompile", "gh-find", "gh-xrefs", "gh-strxref", "gh-scansec", "gh-callsites",
-                "gh-frame", "gh-disasm-range", "gh-scan", "gh-exec", "gh-status"]
+                "gh-frame", "gh-disasm-range", "gh-scan", "gh-exec", "gh-status",
+                "fdb"]
     have = set(os.listdir(BIN)) if os.path.isdir(BIN) else set()
     uassert("bin/ has all wrappers", all(w in have for w in expected), "missing: %s" % [w for w in expected if w not in have])
     nonexec = [w for w in expected if w in have and not os.access(os.path.join(BIN, w), os.X_OK)]
@@ -463,6 +465,13 @@ def test_packaging():
     uassert("binary-audit has sync_to_bv + ingest scripts", all(os.path.exists(os.path.join(BA, "scripts", s)) for s in (
         "sync_to_bv.py", "ingest.py", "ingest_deciders.py", "ingest_guestentry.py")))
     uassert("no stale kernel-audit skill dir", not os.path.isdir(os.path.join(ROOT, "skills", "kernel-audit")))
+    # findings-db skill: SKILL.md + schema + the fdb CLI
+    uassert("findings-db skill present",
+            os.path.exists(os.path.join(FDB, "SKILL.md"))
+            and "name: findings-db" in open(os.path.join(FDB, "SKILL.md")).read())
+    uassert("findings-db has schema.sql + fdb.py",
+            all(os.path.exists(os.path.join(FDB, f))
+                for f in ("schema.sql", os.path.join("scripts", "fdb.py"))))
     # binary-ninja RE-sync: the sidecar apply + var-inspect scripts
     uassert("binary-ninja has re_sync + re_vars scripts", all(os.path.exists(os.path.join(BNJA, s)) for s in (
         "re_sync.py", "re_vars.py")))
@@ -1306,6 +1315,183 @@ def test_sbom_kb():
         shutil.rmtree(td, ignore_errors=True)
 
 
+FDB_SPEC = {
+    "engagements": [{"slug": "eng-t", "name": "Test engagement"}],
+    "targets": [{"slug": "appliance-t", "vendor": "ExampleCorp", "product": "Widget OS",
+                 "kind": "appliance"}],
+    "builds": [{"target": "appliance-t", "version": "1.0", "build": "1000",
+                "is_fleet_current": 1},
+               {"target": "appliance-t", "version": "1.1", "build": "1001"}],
+    "components": [{"target": "appliance-t", "build": "1000", "name": "authd",
+                    "path": "/usr/sbin/authd", "kind": "userworld"}],
+    "findings": [{"slug": "authd-parse-oob", "canonical_id": "X1", "engagement": "eng-t",
+                  "title": "Length field OOB write in the request parser",
+                  "discovery_method": "binary-audit", "bug_class": "oob-write",
+                  "attacker": "unauth-remote", "impact": "rce", "severity": "high",
+                  "status": "static-confirmed", "gating": "default-on", "novelty": "0day"}],
+    "aliases": [{"finding": "authd-parse-oob", "alias": "B7", "namespace": "legacy-audit"}],
+    "affects": [{"finding": "authd-parse-oob", "target": "appliance-t", "build": "1000",
+                 "component": "/usr/sbin/authd", "state": "affected",
+                 "confirmed_how": "static"},
+                {"finding": "authd-parse-oob", "target": "appliance-t", "build": "1001",
+                 "state": "untested"}],
+    "locations": [{"finding": "authd-parse-oob", "func_name": "ParseRequest",
+                   "func_addr": 4198400}],
+    "evidence": [{"finding": "authd-parse-oob", "kind": "decompilation",
+                  "path": "notes/ParseRequest.hlil.c"}],
+    "disclosures": [{"finding": "authd-parse-oob", "vendor": "ExampleCorp",
+                     "vendor_status": "not-submitted"}],
+}
+
+
+def test_findings_db():
+    """findings-db skill: schema, views, load idempotency, ledger import, resolve."""
+    import tempfile, sqlite3, shutil
+    print("\n--- findings-db tests ---")
+    td = tempfile.mkdtemp(prefix="fdb_test_")
+    fdb = os.path.join(FDB, "scripts", "fdb.py")
+    db = os.path.join(td, "assessment.db")
+    spec = os.path.join(td, "spec.json")
+    try:
+        json.dump(FDB_SPEC, open(spec, "w"))
+
+        # 1. init creates the schema; re-init is a no-op, not an error
+        expect("fdb: init", [PY, fdb, "--db", db, "init"], rc=0, has=[r"schema rev 1 ready"])
+        expect("fdb: re-init is idempotent", [PY, fdb, "--db", db, "init"], rc=0)
+        con = sqlite3.connect(db)
+        tables = [r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")]
+        for t in ["engagement", "target", "build", "component", "finding", "finding_alias",
+                  "finding_affects", "finding_location", "evidence", "provenance",
+                  "disclosure", "ledger", "ledger_bug", "schema_rev"]:
+            uassert(f"fdb: schema has table '{t}'", t in tables)
+        views = [r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='view'")]
+        for v in ["v_findings", "v_advisory_affects", "v_method_yield", "v_funnel",
+                  "v_orphans", "v_alias", "v_disclosure_queue"]:
+            uassert(f"fdb: schema has view '{v}'", v in views)
+        for v in views:                      # every view must compile against an empty DB
+            uassert(f"fdb: empty {v} is queryable",
+                    isinstance(con.execute(f"SELECT * FROM {v}").fetchall(), list))
+        uassert("fdb: schema_rev recorded",
+                con.execute("SELECT count(*) FROM schema_rev").fetchone()[0] == 1)
+
+        # 2. operating on a nonexistent DB is refused, not silently created
+        expect("fdb: refuses a missing DB", [PY, fdb, "--db", os.path.join(td, "nope.db"),
+                                             "stats"], rc=1, has=[r"run 'fdb init'"])
+
+        # 3. load, then re-load: the second pass must change nothing (idempotency)
+        expect("fdb: load", [PY, fdb, "--db", db, "load", spec], rc=0,
+               has=[r"findings\s+1 inserted", r"affects\s+2 inserted"])
+        expect("fdb: re-load changes zero rows", [PY, fdb, "--db", db, "load", spec], rc=0,
+               nothas=[r"inserted", r"updated"])
+
+        # 4. an edited field IS picked up (the check above is not vacuous)
+        spec2 = dict(FDB_SPEC)
+        spec2["findings"] = [dict(FDB_SPEC["findings"][0], status="demonstrated")]
+        json.dump(spec2, open(spec, "w"))
+        expect("fdb: load applies a changed field", [PY, fdb, "--db", db, "load", spec],
+               rc=0, has=[r"findings\s+1 updated"])
+        uassert("fdb: status was updated",
+                con.execute("SELECT status FROM finding").fetchone()[0] == "demonstrated")
+        json.dump(FDB_SPEC, open(spec, "w"))
+
+        # 5. referential integrity: an unknown parent is a hard error
+        bogus = os.path.join(td, "bogus.json")
+        json.dump({"builds": [{"target": "no-such-target", "build": "9"}]},
+                  open(bogus, "w"))
+        expect("fdb: unknown target is rejected", [PY, fdb, "--db", db, "load", bogus],
+               rc=1, has=[r"not found"])
+        json.dump({"widgets": []}, open(bogus, "w"))
+        expect("fdb: unknown spec section is rejected", [PY, fdb, "--db", db, "load", bogus],
+               rc=1, has=[r"unknown section"])
+
+        # 6. enums are enforced by the schema, not just by convention
+        try:
+            con.execute("INSERT INTO finding(slug,title,discovery_method,status) "
+                        "VALUES('x','x','telepathy','suspected')")
+            bad("fdb: discovery_method enum is enforced", "bad value was accepted")
+        except sqlite3.IntegrityError:
+            ok("fdb: discovery_method enum is enforced")
+        con.rollback()   # either way: leave no write txn holding the DB lock,
+                         # or the fdb.py subprocesses below hit 'database is locked'
+
+        # 7. legacy signifier -> canonical finding
+        expect("fdb: resolve an alias", [PY, fdb, "--db", db, "resolve", "B7"], rc=0,
+               has=[r"X1", r"authd-parse-oob"])
+        expect("fdb: resolve a canonical id", [PY, fdb, "--db", db, "resolve", "X1"], rc=0,
+               has=[r"authd-parse-oob"])
+        expect("fdb: unknown signifier exits nonzero",
+               [PY, fdb, "--db", db, "resolve", "ZZ99"], rc=1, has=[r"not a known signifier"])
+
+        # 8. producer-ledger import: register, import twice, funnel counts
+        led = os.path.join(td, "kreview.db")
+        lc = sqlite3.connect(led)
+        lc.executescript(
+            "CREATE TABLE bug(id INTEGER PRIMARY KEY, func_name TEXT, bug_class TEXT,"
+            " confidence TEXT, status TEXT, desc TEXT);"
+            "CREATE TABLE audit(id INTEGER PRIMARY KEY, func_name TEXT, verdict TEXT,"
+            " confidence TEXT);"
+            "INSERT INTO bug(func_name,bug_class,confidence,status,desc) VALUES"
+            " ('ParseRequest','oob-write','high','open','unbounded length'),"
+            " ('HandleAuth','null-deref','low','open','unchecked alloc');"
+            "INSERT INTO audit(func_name,verdict) VALUES"
+            " ('ParseRequest','established-safe'),('ParseRequest','violable-bug'),"
+            " ('HandleAuth','established-safe');")
+        lc.commit(); lc.close()
+        expect("fdb: import-audit refuses an unregistered ledger",
+               [PY, fdb, "--db", db, "import-audit", led], rc=1, has=[r"register-ledger"])
+        expect("fdb: register-ledger",
+               [PY, fdb, "--db", db, "register-ledger", "--path", led, "--kind", "audit",
+                "--target", "appliance-t", "--build", "1000"], rc=0, has=[r"ledger inserted"])
+        expect("fdb: import-audit", [PY, fdb, "--db", db, "import-audit", led], rc=0,
+               has=[r"2 inserted"])
+        expect("fdb: re-import inserts nothing", [PY, fdb, "--db", db, "import-audit", led],
+               rc=0, has=[r"0 inserted, 0 updated"])
+        v = con.execute("SELECT verdict FROM ledger_bug WHERE func_name='ParseRequest'"
+                        ).fetchone()[0]
+        uassert("fdb: strongest verdict wins over a safe adjudication",
+                v == "violable-bug", f"got {v!r}")
+        fun = con.execute("SELECT ledger_bugs, violable, promoted, violable_unpromoted "
+                          "FROM v_funnel").fetchone()
+        uassert("fdb: v_funnel counts the import", tuple(fun) == (2, 1, 0, 1), f"got {tuple(fun)}")
+        uassert("fdb: v_orphans surfaces the unpromoted violable bug",
+                [r[0] for r in con.execute("SELECT func_name FROM v_orphans")] ==
+                ["ParseRequest"])
+        con.execute("UPDATE ledger_bug SET disposition='duplicate of X1' "
+                    "WHERE func_name='ParseRequest'")
+        con.commit()
+        uassert("fdb: a disposition clears the orphan",
+                con.execute("SELECT count(*) FROM v_orphans").fetchone()[0] == 0)
+
+        # 9. the reporting views carry the loaded data
+        rows = con.execute("SELECT canonical_id, affected_line, state "
+                           "FROM v_advisory_affects").fetchall()
+        uassert("fdb: v_advisory_affects has both builds", len(rows) == 2)
+        uassert("fdb: v_advisory_affects builds a product line",
+                any("Widget OS 1.0, build 1000" in r[1] for r in rows), str(rows))
+        uassert("fdb: v_findings rolls up the affected target",
+                con.execute("SELECT targets FROM v_findings").fetchone()[0] == "appliance-t")
+        uassert("fdb: v_disclosure_queue lists the unsubmitted 0-day",
+                con.execute("SELECT count(*) FROM v_disclosure_queue").fetchone()[0] == 1)
+
+        # 10. query guards writes by default
+        expect("fdb: query runs SELECT", [PY, fdb, "--db", db, "query",
+               "SELECT slug FROM finding"], rc=0, has=[r"authd-parse-oob"])
+        expect("fdb: query refuses a write without --write",
+               [PY, fdb, "--db", db, "query", "DELETE FROM finding"], rc=1,
+               has=[r"refusing a non-SELECT"])
+        uassert("fdb: the refused write did not happen",
+                con.execute("SELECT count(*) FROM finding").fetchone()[0] == 1)
+        expect("fdb: stats", [PY, fdb, "--db", db, "stats"], rc=0,
+               has=[r"finding\s+1", r"yield by target"])
+        con.close()
+    except Exception as e:
+        bad("findings-db suite", repr(e))
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
 # --- disclosure hygiene ----------------------------------------------------
 # This repo is public. Two tiers:
 #
@@ -1402,7 +1588,8 @@ def main():
     unit_binary_audit()         # always (no BN): ledger->comment builder + ingest caps
     unit_symbolicate()          # always (no BN): sidecar naming + split/combine/ingest helpers
     test_sbom_kb()              # always (no BN/network): schema, build, views, leak-check
-    test_repo_hygiene()         # always: no engagement-identifying tokens (repo is public)
+    test_findings_db()          # always (no BN/network): schema, views, load/import idempotency
+    test_repo_hygiene()       # always: no engagement-identifying tokens (repo is public)
     have_caps = True
     try:
         import capstone, elftools  # noqa

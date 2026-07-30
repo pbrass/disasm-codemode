@@ -1341,6 +1341,8 @@ FDB_SPEC = {
                   "path": "notes/ParseRequest.hlil.c"}],
     "disclosures": [{"finding": "authd-parse-oob", "vendor": "ExampleCorp",
                      "vendor_status": "not-submitted"}],
+    "ledgers": [{"path": "audit/authd/kreview.db", "kind": "audit",
+                 "target": "appliance-t", "build": "1000", "component": "/usr/sbin/authd"}],
 }
 
 
@@ -1356,8 +1358,9 @@ def test_findings_db():
         json.dump(FDB_SPEC, open(spec, "w"))
 
         # 1. init creates the schema; re-init is a no-op, not an error
-        expect("fdb: init", [PY, fdb, "--db", db, "init"], rc=0, has=[r"schema rev 1 ready"])
-        expect("fdb: re-init is idempotent", [PY, fdb, "--db", db, "init"], rc=0)
+        expect("fdb: init", [PY, fdb, "--db", db, "init"], rc=0, has=[r"schema rev \d+ ready"])
+        expect("fdb: re-init is idempotent", [PY, fdb, "--db", db, "init"], rc=0,
+               nothas=[r"upgraded rev"])
         con = sqlite3.connect(db)
         tables = [r[0] for r in con.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")]
@@ -1396,6 +1399,14 @@ def test_findings_db():
                 con.execute("SELECT status FROM finding").fetchone()[0] == "demonstrated")
         json.dump(FDB_SPEC, open(spec, "w"))
 
+        # 4b. a ledger loaded by spec resolves target/build/component and absolutises its path
+        lrow = con.execute("SELECT l.path, t.slug, b.build, c.name FROM ledger l "
+                           "JOIN target t ON t.id=l.target_id JOIN build b ON b.id=l.build_id "
+                           "JOIN component c ON c.id=l.component_id").fetchone()
+        uassert("fdb: spec ledger resolves its scope",
+                lrow and tuple(lrow)[1:] == ("appliance-t", "1000", "authd"), str(lrow and tuple(lrow)))
+        uassert("fdb: ledger path is absolute", lrow and os.path.isabs(lrow[0]), str(lrow))
+
         # 5. referential integrity: an unknown parent is a hard error
         bogus = os.path.join(td, "bogus.json")
         json.dump({"builds": [{"target": "no-such-target", "build": "9"}]},
@@ -1405,6 +1416,10 @@ def test_findings_db():
         json.dump({"widgets": []}, open(bogus, "w"))
         expect("fdb: unknown spec section is rejected", [PY, fdb, "--db", db, "load", bogus],
                rc=1, has=[r"unknown section"])
+        json.dump({"ledgers": [{"path": "x.db", "kind": "audit", "build": "1000"}]},
+                  open(bogus, "w"))
+        expect("fdb: ledger build without target is rejected",
+               [PY, fdb, "--db", db, "load", bogus], rc=1, has=[r"needs a 'target'"])
 
         # 6. enums are enforced by the schema, not just by convention
         try:
@@ -1448,12 +1463,14 @@ def test_findings_db():
                has=[r"2 inserted"])
         expect("fdb: re-import inserts nothing", [PY, fdb, "--db", db, "import-audit", led],
                rc=0, has=[r"0 inserted, 0 updated"])
-        v = con.execute("SELECT verdict FROM ledger_bug WHERE func_name='ParseRequest'"
-                        ).fetchone()[0]
+        v, vr = con.execute("SELECT verdict, verdict_raw FROM ledger_bug "
+                            "WHERE func_name='ParseRequest'").fetchone()
         uassert("fdb: strongest verdict wins over a safe adjudication",
-                v == "violable-bug", f"got {v!r}")
+                v == "violable", f"got {v!r}")
+        uassert("fdb: the producer's own label is preserved verbatim",
+                vr == "violable-bug", f"got {vr!r}")
         fun = con.execute("SELECT ledger_bugs, violable, promoted, violable_unpromoted "
-                          "FROM v_funnel").fetchone()
+                          "FROM v_funnel WHERE path = ?", (led,)).fetchone()
         uassert("fdb: v_funnel counts the import", tuple(fun) == (2, 1, 0, 1), f"got {tuple(fun)}")
         uassert("fdb: v_orphans surfaces the unpromoted violable bug",
                 [r[0] for r in con.execute("SELECT func_name FROM v_orphans")] ==
@@ -1486,6 +1503,64 @@ def test_findings_db():
         expect("fdb: stats", [PY, fdb, "--db", db, "stats"], rc=0,
                has=[r"finding\s+1", r"yield by target"])
         con.close()
+
+        # 11. verdict normalization -- the label shapes eight producer ledgers
+        #     actually emitted. An unmapped label is invisible to v_funnel/v_orphans,
+        #     which is the exact failure this store exists to stop, so pin the parse.
+        import importlib.util
+        _s = importlib.util.spec_from_file_location(
+            "fdb_mod", os.path.join(FDB, "scripts", "fdb.py"))
+        _m = importlib.util.module_from_spec(_s); _s.loader.exec_module(_m)
+        nv = _m.normalize_verdict
+        for raw, want in [
+                ("violable-bug", "violable"),                 # Stage-3 taxonomy
+                ("established-safe", "refuted"),
+                ("confirmed-violable[reachability]", "violable"),      # annotated
+                ("reverify:confirmed-latent[header-ownership (", "latent"),
+                ("stage4:demonstrated-live", "demonstrated"),  # verdict LAST
+                ("refuted: known callers", "refuted"),         # verdict FIRST
+                ("partial: no guest path", "partial"),
+                ("live-gated", "gated"), ("config-gated", "gated"),
+                ("deepdive-needs-live-poc", "candidate"),
+                ("guest-entry", "uncertain"),                  # trace state, not a refutation
+                ("terminal-exhausted-extsym", "uncertain"),
+                ("  Violable-Bug  ", "violable"),              # case/space tolerant
+                (None, None), ("", None), ("something-new", None)]:
+            uassert(f"fdb: normalize_verdict({raw!r}) -> {want!r}",
+                    nv(raw) == want, f"got {nv(raw)!r}")
+        uassert("fdb: every VERDICT_MAP value is a ranked tier",
+                set(_m.VERDICT_MAP.values()) <= set(_m.VERDICT_RANK),
+                str(set(_m.VERDICT_MAP.values()) - set(_m.VERDICT_RANK)))
+
+        # 12. schema migration: an older DB gains the added columns in place.
+        #     CREATE TABLE IF NOT EXISTS cannot add a column, so this path is the
+        #     only thing standing between a rev bump and a live DB that silently
+        #     keeps the old shape.
+        old = os.path.join(td, "old.db")
+        sh([PY, fdb, "--db", old, "init"])
+        oc = sqlite3.connect(old)
+        # a real rev-1 DB has rev-1 views; drop them so DROP COLUMN is not blocked by
+        # the current views referencing the very column we are rolling back
+        for vw in [r[0] for r in oc.execute(
+                "SELECT name FROM sqlite_master WHERE type='view'")]:
+            oc.execute(f"DROP VIEW {vw}")
+        for _, tbl, col, _d in _m.ADDED_COLUMNS:          # roll it back to the prior rev
+            oc.execute(f"ALTER TABLE {tbl} DROP COLUMN {col}")
+        oc.execute("DELETE FROM schema_rev")
+        oc.execute("INSERT INTO schema_rev(rev, applied_at, note) VALUES(1, '2000-01-01', 'old')")
+        oc.commit(); oc.close()
+        expect("fdb: init upgrades an older DB in place",
+               [PY, fdb, "--db", old, "init"], rc=0,
+               has=[r"upgraded rev 1 -> %d" % _m.SCHEMA_REV, r"re-run the importers"])
+        oc = sqlite3.connect(old)
+        for _, tbl, col, _d in _m.ADDED_COLUMNS:
+            uassert(f"fdb: migration added {tbl}.{col}",
+                    col in {r[1] for r in oc.execute(f"PRAGMA table_info({tbl})")})
+        uassert("fdb: migration records the new rev",
+                oc.execute("SELECT max(rev) FROM schema_rev").fetchone()[0] == _m.SCHEMA_REV)
+        expect("fdb: the upgraded DB is then stable",
+               [PY, fdb, "--db", old, "init"], rc=0, nothas=[r"upgraded rev"])
+        oc.close()
     except Exception as e:
         bad("findings-db suite", repr(e))
     finally:

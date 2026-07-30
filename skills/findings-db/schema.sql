@@ -194,7 +194,8 @@ CREATE TABLE IF NOT EXISTS ledger_bug(
   bug_class TEXT,
   confidence TEXT,
   status TEXT,                           -- as recorded by the producer
-  verdict TEXT,                          -- adjudication, where the producer has one
+  verdict TEXT,                          -- adjudication, NORMALIZED (see fdb.py VERDICT_MAP)
+  verdict_raw TEXT,                      -- the producer's own label, kept verbatim
   impact TEXT,
   reachability TEXT,
   descr TEXT,
@@ -263,25 +264,36 @@ SELECT COALESCE(t.slug,'(unscoped)') AS target,
 DROP VIEW IF EXISTS v_funnel;
 CREATE VIEW v_funnel AS
 SELECT l.id, l.path, l.kind, l.row_counts,
-       count(lb.id)                                AS ledger_bugs,
-       sum(lb.verdict = 'violable-bug')            AS violable,
-       sum(lb.finding_id IS NOT NULL)              AS promoted,
-       sum(lb.finding_id IS NULL AND lb.verdict = 'violable-bug') AS violable_unpromoted
+       count(lb.id)                                     AS ledger_bugs,
+       sum(lb.verdict = 'demonstrated')                 AS demonstrated,
+       sum(lb.verdict IN ('violable','demonstrated'))   AS violable,
+       sum(lb.verdict IN ('gated','latent'))            AS real_but_not_live,
+       sum(lb.verdict = 'candidate')                    AS candidate,
+       sum(lb.verdict IN ('partial','uncertain'))       AS unresolved,
+       sum(lb.verdict IS NULL)                          AS unadjudicated,
+       sum(lb.finding_id IS NOT NULL)                   AS promoted,
+       sum(lb.finding_id IS NULL AND lb.disposition IS NULL
+           AND lb.verdict IN ('violable','demonstrated')) AS violable_unpromoted
   FROM ledger l
   LEFT JOIN ledger_bug lb ON lb.ledger_id = l.id
  GROUP BY l.id;
 
 -- Adjudicated-real ledger bugs that never became a finding, with no explicit
--- disposition. The "did we drop one?" check.
+-- disposition. The "did we drop one?" check. Includes gated/latent: those are real
+-- bugs whose reachability is conditional, not refutations, and they are the easiest
+-- kind to lose track of. Order by tier to work the sweep strongest-first.
 DROP VIEW IF EXISTS v_orphans;
 CREATE VIEW v_orphans AS
-SELECT l.path AS ledger, lb.id, lb.func_name, lb.bug_class, lb.verdict,
-       lb.impact, lb.reachability, lb.descr
+SELECT l.path AS ledger, lb.id, lb.func_name, lb.bug_class, lb.verdict, lb.verdict_raw,
+       CASE lb.verdict WHEN 'demonstrated' THEN 1 WHEN 'violable' THEN 2
+                       WHEN 'gated' THEN 3 WHEN 'latent' THEN 4 ELSE 5 END AS tier,
+       lb.impact, lb.reachability, lb.confidence, lb.descr
   FROM ledger_bug lb
   JOIN ledger l ON l.id = lb.ledger_id
  WHERE lb.finding_id IS NULL
    AND lb.disposition IS NULL
-   AND (lb.verdict = 'violable-bug' OR lb.status IN ('confirmed-violable','confirmed'));
+   AND (lb.verdict IN ('violable', 'demonstrated', 'gated', 'latent')
+        OR lb.status IN ('confirmed-violable', 'confirmed', 'demonstrated'));
 
 DROP VIEW IF EXISTS v_alias;
 CREATE VIEW v_alias AS

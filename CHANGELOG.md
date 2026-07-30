@@ -3,6 +3,48 @@
 All notable changes to disasm-codemode. Versioning is semantic (MAJOR.MINOR.PATCH); pre-1.0,
 minor versions may add features and refine interfaces.
 
+## 0.14.1 — 2026-07-29
+
+### `findings-db` schema rev 2 — verdict-vocabulary normalization
+Backfilling a real assessment's six audit ledgers immediately exposed the failure mode the store
+was built to catch, in the store itself: three modules reported **0 violable** in `v_funnel`
+despite each having known confirmed-violable bugs. Nothing was wrong with the bugs — their
+producers had simply spelled the verdict differently, and the funnel's `verdict = 'violable-bug'`
+missed every one. A store that silently under-counts is worse than no store, because "0 violable"
+reads as a clean result.
+
+- **`normalize_verdict()`** maps producer labels onto one ranked vocabulary
+  (`demonstrated > violable > gated > latent > candidate > partial > uncertain > refuted`) and
+  handles the shapes ledgers actually emit: annotated (`confirmed-violable[reachability]`),
+  pass-prefixed (`stage4:demonstrated-live`), and prose-suffixed (`refuted: known callers`) —
+  note the last two put the verdict at *opposite* ends, so both are tried.
+- **`ledger_bug.verdict_raw`** keeps the producer's own label verbatim. Normalizing is lossy;
+  discarding the original would make a mis-mapping undetectable after the fact.
+- **`candidate` is a new tier**, for "a concrete unsafe op, reachability not yet proven". It was
+  being flattened into `uncertain`, which conflates a lead worth chasing with a dead end.
+- **An unmappable label is reported loudly** at import rather than stored as NULL — a label
+  nothing maps to is a bug invisible to both `v_funnel` and `v_orphans`, i.e. the original bug.
+- **`v_funnel`** gains `candidate` and `unadjudicated` columns. `unadjudicated` counts bugs whose
+  ledger carries no verdict for that function name (producer ledgers key verdicts by function, and
+  a late pass may have recorded one against the *decider* instead) — a to-do list, not a clean
+  bill of health.
+- **`v_orphans`** now also surfaces `gated`/`latent` — real bugs with conditional reachability are
+  the easiest kind to lose — and exposes a `tier` so the sweep runs strongest-first.
+- **`fdb init` migrates in place.** `CREATE TABLE IF NOT EXISTS` cannot add a column, so an
+  `ADDED_COLUMNS` list ALTERs what is missing, rebuilds the views, records the new rev and says to
+  re-run the importers.
+
+### Fixed
+- `load` was not idempotent: re-running an unchanged spec reported `affects updated` and re-stamped
+  `finding.last_updated` every time, defeating the point of keeping the spec as source of truth.
+- `load` crashed on a ledger entry with `build` but no `target` (the key was never popped, so the
+  INSERT named a nonexistent column). It now fails with the reason. Ledger entries also accept a
+  `component`.
+- `import-audit` on a graph-only ledger (extract+score, no review pass) exited 1 claiming it had
+  recorded row counts, which it had not. It now records them and says so.
+- `import-sbom` assumed a `host.name` column and crashed; it now detects the identifying column and
+  cross-checks each host's build against the `build` table.
+
 ## 0.14.0 — 2026-07-29
 
 ### New skill: `findings-db` — one finding store per assessment

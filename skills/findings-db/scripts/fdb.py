@@ -20,8 +20,8 @@ import argparse, json, os, sqlite3, sys, hashlib, datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCHEMA = os.path.join(os.path.dirname(HERE), "schema.sql")
-SCHEMA_REV = 1
-VERSION = "0.1.0"
+SCHEMA_REV = 2
+VERSION = "0.2.0"
 
 
 def now():
@@ -44,15 +44,43 @@ def connect(args, create=False):
 
 # ------------------------------------------------------------------ init
 
+# Columns added after rev 1. CREATE TABLE IF NOT EXISTS cannot add a column to an
+# existing table and views are dropped/recreated by the script, so only columns need
+# an explicit migration step.
+ADDED_COLUMNS = [
+    (2, "ledger_bug", "verdict_raw", "TEXT"),
+]
+
+
 def cmd_init(args):
     con = connect(args, create=True)
+    existing = os.path.exists(db_path(args)) and con.execute(
+        "SELECT count(*) c FROM sqlite_master WHERE type='table' AND name='schema_rev'"
+    ).fetchone()["c"] > 0
+    prev = (con.execute("SELECT max(rev) AS r FROM schema_rev").fetchone()["r"]
+            if existing else None)
     with open(SCHEMA) as fh:
         con.executescript(fh.read())
-    cur = con.execute("SELECT max(rev) AS r FROM schema_rev").fetchone()
-    if cur["r"] is None:
+    added = []
+    for rev, table, col, decl in ADDED_COLUMNS:
+        cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
+        if col not in cols:
+            con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+            added.append(f"{table}.{col}")
+    if prev is None:
         con.execute("INSERT INTO schema_rev(rev, applied_at, note) VALUES(?,?,?)",
                     (SCHEMA_REV, now(), f"initial schema, fdb {VERSION}"))
+    elif prev < SCHEMA_REV:
+        con.execute("INSERT INTO schema_rev(rev, applied_at, note) VALUES(?,?,?)",
+                    (SCHEMA_REV, now(),
+                     f"upgraded from rev {prev} by fdb {VERSION}: " +
+                     (", ".join(added) if added else "views only")))
     con.commit()
+    if prev is not None and prev < SCHEMA_REV:
+        print(f"[fdb] upgraded rev {prev} -> {SCHEMA_REV}" +
+              (f" (added {', '.join(added)})" if added else " (views rebuilt)"))
+        if added:
+            print("      re-run the importers to populate the new column(s)")
     print(f"[fdb] schema rev {SCHEMA_REV} ready at {db_path(args)}")
     return 0
 
@@ -86,6 +114,15 @@ def _lookup(con, table, col, val, what):
     r = con.execute(f"SELECT id FROM {table} WHERE {col} = ?", (val,)).fetchone()
     if r is None:
         sys.exit(f"[fdb] {what} '{val}' not found -- define it before referencing it")
+    return r["id"]
+
+
+def _component_id(con, build_id, comp):
+    """Resolve a component within a build by path or by name."""
+    r = con.execute("SELECT id FROM component WHERE build_id = ? AND (path = ? OR name = ?)",
+                    (build_id, comp, comp)).fetchone()
+    if r is None:
+        sys.exit(f"[fdb] component '{comp}' not found in that build")
     return r["id"]
 
 
@@ -158,13 +195,7 @@ def cmd_load(args):
         fid = _lookup(con, "finding", "slug", a.pop("finding"), "finding")
         bid = _build_id(con, a.pop("target"), a.pop("build"))
         comp = a.pop("component", None)
-        cid = None
-        if comp:
-            r = con.execute("SELECT id FROM component WHERE build_id = ? AND (path = ? "
-                            "OR name = ?)", (bid, comp, comp)).fetchone()
-            if r is None:
-                sys.exit(f"[fdb] component '{comp}' not found in that build")
-            cid = r["id"]
+        cid = _component_id(con, bid, comp) if comp else None
         a.update(finding_id=fid, build_id=bid, component_id=cid)
         # component_id NULL participates in the PK, so match it explicitly
         ex = con.execute("SELECT rowid FROM finding_affects WHERE finding_id=? AND "
@@ -205,12 +236,20 @@ def cmd_load(args):
 
     for l in spec.get("ledgers", []):
         l = dict(l)
-        if "target" in l:
-            l["target_id"] = _lookup(con, "target", "slug", l.pop("target"), "target")
-        if "build" in l:
-            tgt = con.execute("SELECT slug FROM target WHERE id=?",
-                              (l.get("target_id"),)).fetchone()
-            l["build_id"] = _build_id(con, tgt["slug"], l.pop("build")) if tgt else None
+        target = l.pop("target", None)
+        build = l.pop("build", None)
+        comp = l.pop("component", None)
+        if build and not target:
+            sys.exit(f"[fdb] ledger {l.get('path')}: 'build' needs a 'target' to resolve against")
+        if target:
+            l["target_id"] = _lookup(con, "target", "slug", target, "target")
+        if build:
+            l["build_id"] = _build_id(con, target, build)
+            if comp:
+                l["component_id"] = _component_id(con, l["build_id"], comp)
+        elif comp:
+            sys.exit(f"[fdb] ledger {l.get('path')}: 'component' needs a 'build'")
+        l["path"] = os.path.abspath(os.path.expanduser(l["path"]))
         _, v = _upsert(con, "ledger", ["path"], l); bump("ledgers", v)
 
     con.commit()
@@ -239,6 +278,62 @@ def cmd_register_ledger(args):
 
 AUDIT_ROWCOUNT_TABLES = ["func", "edge", "review", "precondition", "bug", "audit"]
 
+# Producer ledgers drift: the Stage-3 taxonomy is 'violable-bug'/'established-safe'/
+# 'partial'/'uncertain', but per-module runs invented 'confirmed-violable'/
+# 'confirmed-latent'/'gated', later passes prefixed and annotated them
+# ('reverify:confirmed-violable[reachability]', 'stage4:demonstrated-live'), and the
+# live-validation pass added its own tier ('live-gated'/'live-latent'/'live-refuted').
+# Normalize on the way in and keep the producer's own label in verdict_raw --
+# otherwise a cross-ledger funnel silently under-counts whichever spelling it missed.
+VERDICT_MAP = {
+    # proven on a running target
+    "demonstrated": "demonstrated", "demonstrated-live": "demonstrated",
+    # the bound is breakable from an attacker-reachable path
+    "violable-bug": "violable", "confirmed-violable": "violable", "confirmed": "violable",
+    "violable": "violable", "default-reachable-leak": "violable",
+    # real, but off by configuration on a stock build
+    "gated": "gated", "config-gated": "gated", "live-gated": "gated",
+    # real, but the code path is not built/enabled on the builds in scope
+    "confirmed-latent": "latent", "latent": "latent", "live-latent": "latent",
+    # a concrete unsafe operation, reachability or liveness not yet proven
+    "candidate": "candidate", "candidate-needs-poc": "candidate",
+    "deepdive-needs-live-poc": "candidate",
+    # the bound holds on some paths but not all
+    "partial": "partial",
+    # static analysis could not settle it -- NOT a refutation
+    "uncertain": "uncertain", "has-uncertain": "uncertain",
+    "uncertain-continue": "uncertain", "uncertain-external": "uncertain",
+    # trace-state labels: the pass stopped without an answer. 'guest-entry' and
+    # 'terminal-exhausted-*' mean "walked as far as static analysis goes and the
+    # establishing check was never found" -- unresolved, not confirmed either way.
+    "guest-entry": "uncertain",
+    "terminal-exhausted-extsym": "uncertain", "terminal-exhausted-guest-entry": "uncertain",
+    "re-complete-live-blocked": "uncertain",
+    # the bound is enforced, or the path is unreachable
+    "established-safe": "refuted", "all-established-safe": "refuted", "refuted": "refuted",
+    "not-a-bug": "refuted", "deepdive-refuted": "refuted", "live-refuted": "refuted",
+    "refuted-unreachable": "refuted",
+}
+# Strongest first: how sure are we this is a real, live bug?
+VERDICT_RANK = ["demonstrated", "violable", "gated", "latent", "candidate",
+                "partial", "uncertain", "refuted"]
+
+
+def normalize_verdict(raw):
+    """Producer verdict label -> the shared vocabulary. Returns None if unmappable."""
+    if not raw:
+        return None
+    v = raw.strip().lower().split("[", 1)[0].strip()   # 'confirmed-violable[reachability]'
+    if v in VERDICT_MAP:
+        return VERDICT_MAP[v]
+    if ":" not in v:
+        return None
+    # A colon is used two opposite ways. Pass prefixes put the verdict LAST
+    # ('stage4:demonstrated-live'); free-text rationale puts it FIRST
+    # ('refuted: known callers', 'partial: no guest path'). Try both ends.
+    head, tail = v.split(":", 1)[0].strip(), v.rsplit(":", 1)[1].strip()
+    return VERDICT_MAP.get(tail) or VERDICT_MAP.get(head)
+
 
 def cmd_import_audit(args):
     """Promote a binary-audit ledger's bug/audit rows to thin ledger_bug pointers."""
@@ -256,33 +351,51 @@ def cmd_import_audit(args):
 
     counts = {t: src.execute(f"SELECT count(*) c FROM {t}").fetchone()["c"]
               for t in AUDIT_ROWCOUNT_TABLES if has(t)}
+
+    def stamp():
+        con.execute("UPDATE ledger SET row_counts = ?, last_synced = ? WHERE id = ?",
+                    (json.dumps(counts), now(), lrow["id"]))
+        con.commit()
+
     if not has("bug"):
-        sys.exit(f"[fdb] {src_path} has no 'bug' table (graph-only ledger?) -- "
-                 f"registered with counts only")
+        # a graph-only ledger (extract+score, no review pass) still has a useful
+        # row-count snapshot -- record it and say so, rather than failing
+        stamp()
+        print(f"[fdb] {src_path}\n      counts {counts}\n"
+              f"      no 'bug' table (graph-only ledger) -- row counts recorded, "
+              f"nothing to promote")
+        return 0
 
     # audit verdicts are keyed by function name, not by bug id, in every revision
-    verdicts = {}
+    verdicts, unmapped = {}, {}
     if has("audit"):
-        for a in src.execute("SELECT func_name, verdict, confidence FROM audit"):
-            verdicts.setdefault(a["func_name"], []).append(a)
+        for a in src.execute("SELECT func_name, verdict FROM audit"):
+            norm = normalize_verdict(a["verdict"])
+            if norm is None and a["verdict"]:
+                unmapped[a["verdict"]] = unmapped.get(a["verdict"], 0) + 1
+            verdicts.setdefault(a["func_name"], []).append((norm, a["verdict"]))
 
     cols = {r[1] for r in src.execute("PRAGMA table_info(bug)")}
     ins = upd = 0
     for b in src.execute("SELECT rowid AS rid, * FROM bug"):
         v = verdicts.get(b["func_name"], [])
-        # a function can have several adjudications; the strongest one wins
-        verdict = None
-        for pref in ("violable-bug", "partial", "uncertain", "established-safe"):
-            if any(x["verdict"] == pref for x in v):
-                verdict = pref
+        # a function can carry several adjudications; the strongest one wins, so a
+        # later 'established-safe' on one path cannot bury an earlier 'violable-bug'
+        verdict = verdict_raw = None
+        for pref in VERDICT_RANK:
+            hit = next((x for x in v if x[0] == pref), None)
+            if hit:
+                verdict, verdict_raw = hit
                 break
+        if verdict is None and v:                    # only unmappable labels
+            verdict_raw = v[0][1]
         row = {
             "ledger_id": lrow["id"], "src_rowid": b["rid"],
             "func_name": b["func_name"],
             "bug_class": b["bug_class"] if "bug_class" in cols else None,
             "confidence": b["confidence"] if "confidence" in cols else None,
             "status": b["status"] if "status" in cols else None,
-            "verdict": verdict,
+            "verdict": verdict, "verdict_raw": verdict_raw,
             "impact": b["impact"] if "impact" in cols else None,
             "reachability": b["reachability"] if "reachability" in cols else None,
             "descr": (b["desc"] if "desc" in cols else None),
@@ -290,11 +403,15 @@ def cmd_import_audit(args):
         _, verb = _upsert(con, "ledger_bug", ["ledger_id", "src_rowid"], row)
         ins += verb == "inserted"
         upd += verb == "updated"
-    con.execute("UPDATE ledger SET row_counts = ?, last_synced = ? WHERE id = ?",
-                (json.dumps(counts), now(), lrow["id"]))
-    con.commit()
+    stamp()
     print(f"[fdb] {src_path}\n      counts {counts}\n      ledger_bug: {ins} inserted, "
           f"{upd} updated")
+    if unmapped:
+        # loud on purpose: an unmapped label is a bug that will not show up in
+        # v_funnel or v_orphans, which is the exact failure this store exists to stop
+        print("      ** unmapped verdict label(s) -- extend VERDICT_MAP:")
+        for lbl, n in sorted(unmapped.items(), key=lambda kv: -kv[1]):
+            print(f"           {n:>4}x {lbl!r}")
     return 0
 
 
@@ -316,8 +433,26 @@ def cmd_import_sbom(args):
         row["build_id"] = _build_id(con, args.target, args.build)
     lid, verb = _upsert(con, "ledger", ["path"], row)
     con.commit()
-    hosts = [r[0] for r in src.execute("SELECT DISTINCT name FROM host")] if "host" in tabs else []
-    print(f"[fdb] sbom ledger {verb}: id={lid}\n      counts {counts}\n      hosts {hosts}")
+    print(f"[fdb] sbom ledger {verb}: id={lid}\n      counts {counts}")
+
+    # An SBOM KB records the hosts it was collected from, and those carry build
+    # numbers -- so it can say whether the scope this DB knows about matches the
+    # scope the KB was actually built from. Report, don't reconcile silently.
+    if "host" not in tabs:
+        return 0
+    hcols = [r[1] for r in src.execute("PRAGMA table_info(host)")]
+    idcol = next((c for c in ("alias", "name", "host", "hostname") if c in hcols), hcols[0])
+    sel = ", ".join(c for c in (idcol, "build", "os_version", "role") if c in hcols)
+    for h in src.execute(f"SELECT {sel} FROM host ORDER BY 1"):
+        b = h["build"] if "build" in hcols else None
+        if b is None:
+            mark = "no build recorded"
+        else:
+            m = con.execute("SELECT t.slug FROM build bu JOIN target t ON t.id = bu.target_id "
+                            "WHERE bu.build = ?", (str(b),)).fetchall()
+            mark = ("-> " + ",".join(r["slug"] for r in m)) if m else "** no matching build row"
+        extra = " ".join(str(h[c]) for c in ("os_version", "role") if c in hcols and h[c])
+        print(f"      host {h[idcol]:<12} build {b or '-':<12} {extra:<28} {mark}")
     return 0
 
 

@@ -109,9 +109,39 @@ fdb import-audit audit/kreview.db          # -> ledger_bug rows + a row_counts s
 fdb query "SELECT * FROM v_orphans"        # adjudicated-real, never promoted, no disposition
 ```
 `import-audit` tolerates producer schema drift (it reads `PRAGMA table_info(bug)` and takes what
-is there) and picks the **strongest** adjudication per function
-(`violable-bug > partial > uncertain > established-safe`) — a function reviewed twice must not
-be filed under whichever verdict landed last.
+is there) and picks the **strongest** adjudication per function — a function reviewed twice must
+not be filed under whichever verdict landed last.
+
+### The verdict vocabulary
+Producer ledgers drift. The same concept gets spelled `violable-bug` in one pass,
+`confirmed-violable` in another, `reverify:confirmed-violable[reachability]` in a third, and
+`refuted: <a paragraph of prose>` in a fourth. A funnel that misses a spelling silently
+under-counts — which looks exactly like "we found nothing there". So `import-audit` normalizes
+into one ranked vocabulary and keeps the producer's own label in `verdict_raw`:
+
+| tier | verdict | means |
+|------|---------|-------|
+| 1 | `demonstrated` | proven on a running target |
+| 2 | `violable` | the bound is breakable from an attacker-reachable path |
+| 3 | `gated` | real, but off by configuration on a stock build |
+| 4 | `latent` | real, but the path is not built/enabled on the builds in scope |
+| 5 | `candidate` | a concrete unsafe op; reachability or liveness not yet proven |
+| 6 | `partial` | enforced on some paths, not all |
+| 7 | `uncertain` | static analysis could not settle it — **not** a refutation |
+| 8 | `refuted` | the bound is enforced, or the path is unreachable |
+
+An unmappable label is **reported loudly** rather than stored as NULL, because a label nothing
+maps to is a bug invisible to both `v_funnel` and `v_orphans`. Extend `VERDICT_MAP` in `fdb.py`
+when a new producer spelling shows up; `normalize_verdict()` already handles the annotated
+(`x[note]`), pass-prefixed (`stage4:x`) and prose-suffixed (`x: because...`) shapes.
+
+Two caveats worth knowing before you read a funnel:
+- **Verdicts join to bugs by function name** — that is the only key producer ledgers carry. Where
+  a late pass recorded its verdict against the *decider* rather than the flagged function, the
+  verdict does not attach, and the bug lands in `unadjudicated`. That column is a to-do list, not
+  a clean bill of health.
+- **`uncertain` is not `refuted`.** Trace-state labels (`guest-entry`, `terminal-exhausted-*`)
+  mean the trace ran out of static road, so they normalize to `uncertain`.
 
 Then either promote or dispose of each orphan; both close the loop:
 ```bash
@@ -126,8 +156,8 @@ fdb query --write "UPDATE ledger_bug SET disposition='not reachable pre-auth' WH
 | `v_findings` | the finding list, with affected targets, evidence count, disclosure state |
 | `v_advisory_affects` | the "Affected Products" block for an advisory, per finding |
 | `v_method_yield` | findings per target × discovery method — which method paid off where |
-| `v_funnel` | per producer ledger: bugs → violable → promoted → violable-but-unpromoted |
-| `v_orphans` | adjudicated-real ledger bugs with no finding and no disposition |
+| `v_funnel` | per producer ledger: bugs by verdict tier → promoted → violable-but-unpromoted |
+| `v_orphans` | adjudicated-real (demonstrated/violable/gated/latent) ledger bugs with no finding and no disposition, `tier`-ranked |
 | `v_alias` | every legacy signifier → its canonical finding |
 | `v_disclosure_queue` | reportable findings with no disclosure record yet |
 

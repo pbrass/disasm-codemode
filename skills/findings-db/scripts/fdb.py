@@ -21,7 +21,7 @@ import argparse, json, os, sqlite3, sys, hashlib, datetime
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCHEMA = os.path.join(os.path.dirname(HERE), "schema.sql")
 SCHEMA_REV = 2
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 
 
 def now():
@@ -90,6 +90,13 @@ def cmd_init(args):
 def _upsert(con, table, keys, row):
     """Insert or update `row` in `table`, matching on the `keys` columns.
     Returns (rowid, 'inserted'|'updated'|'unchanged')."""
+    # A hand-edited spec gets column names wrong; say which key, in which table, and
+    # what is available, instead of letting sqlite raise from inside the INSERT.
+    known = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
+    unknown = [c for c in row if c not in known]
+    if unknown:
+        sys.exit(f"[fdb] {table}: no such column(s) {', '.join(sorted(unknown))}\n"
+                 f"      available: {', '.join(sorted(known))}")
     where = " AND ".join(f"{k} = ?" for k in keys)
     found = con.execute(f"SELECT * FROM {table} WHERE {where}",
                         [row[k] for k in keys]).fetchone()

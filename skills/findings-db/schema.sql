@@ -223,7 +223,9 @@ SELECT f.id, f.canonical_id, f.slug, f.title, f.discovery_method, f.bug_class,
           JOIN build b ON b.id = fa.build_id
           JOIN target t ON t.id = b.target_id
          WHERE fa.finding_id = f.id AND fa.state = 'affected') AS targets,
-       (SELECT count(*) FROM finding_affects fa
+       -- DISTINCT build: affects is keyed per (build, component), so a finding present
+       -- in two components of one build is one affected build, not two.
+       (SELECT count(DISTINCT fa.build_id) FROM finding_affects fa
          WHERE fa.finding_id = f.id AND fa.state = 'affected')  AS affected_builds,
        (SELECT count(*) FROM evidence ev WHERE ev.finding_id = f.id) AS evidence_items,
        d.vendor_status, d.cve, d.submitted
@@ -246,19 +248,27 @@ SELECT f.canonical_id, f.slug, f.title,
  ORDER BY f.canonical_id, t.slug, b.build;
 
 -- Yield per discovery method per target: the cross-target comparison.
+-- Collapse to one row per (finding, target) FIRST. finding_affects has a row per
+-- (build, component), so aggregating over the join directly counts a finding once per
+-- affected build -- which inflates every sum() above the finding count and makes the
+-- headline "which method paid off" number wrong in the flattering direction.
 DROP VIEW IF EXISTS v_method_yield;
 CREATE VIEW v_method_yield AS
-SELECT COALESCE(t.slug,'(unscoped)') AS target,
-       f.discovery_method,
-       count(DISTINCT f.id) AS findings,
-       sum(f.status = 'demonstrated')                   AS demonstrated,
-       sum(f.status IN ('static-confirmed','violable')) AS confirmed,
-       sum(f.severity IN ('critical','high'))           AS high_or_crit
-  FROM finding f
-  LEFT JOIN finding_affects fa ON fa.finding_id = f.id AND fa.state = 'affected'
-  LEFT JOIN build  b ON b.id = fa.build_id
-  LEFT JOIN target t ON t.id = b.target_id
- GROUP BY target, f.discovery_method;
+WITH ft AS (
+  SELECT DISTINCT f.id, f.discovery_method, f.status, f.severity,
+         COALESCE(t.slug, '(unscoped)') AS target
+    FROM finding f
+    LEFT JOIN finding_affects fa ON fa.finding_id = f.id AND fa.state = 'affected'
+    LEFT JOIN build  b ON b.id = fa.build_id
+    LEFT JOIN target t ON t.id = b.target_id
+)
+SELECT target, discovery_method,
+       count(*) AS findings,
+       sum(status = 'demonstrated')                   AS demonstrated,
+       sum(status IN ('static-confirmed','violable')) AS confirmed,
+       sum(severity IN ('critical','high'))           AS high_or_crit
+  FROM ft
+ GROUP BY target, discovery_method;
 
 -- The audit funnel per producer ledger: reviews -> preconditions -> bugs -> promoted.
 DROP VIEW IF EXISTS v_funnel;

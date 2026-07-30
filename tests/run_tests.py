@@ -1420,6 +1420,13 @@ def test_findings_db():
                   open(bogus, "w"))
         expect("fdb: ledger build without target is rejected",
                [PY, fdb, "--db", db, "load", bogus], rc=1, has=[r"needs a 'target'"])
+        # a hand-edited spec gets column names wrong; the error must name the table, the
+        # bad key and what is available, not surface sqlite's message from inside INSERT
+        json.dump({"builds": [{"target": "appliance-t", "build": "1000",
+                               "channel": "ga"}]}, open(bogus, "w"))
+        expect("fdb: an unknown spec column names itself and the alternatives",
+               [PY, fdb, "--db", db, "load", bogus], rc=1,
+               has=[r"build: no such column\(s\) channel", r"available:.*marketing_name"])
 
         # 6. enums are enforced by the schema, not just by convention
         try:
@@ -1491,6 +1498,26 @@ def test_findings_db():
                 con.execute("SELECT targets FROM v_findings").fetchone()[0] == "appliance-t")
         uassert("fdb: v_disclosure_queue lists the unsubmitted 0-day",
                 con.execute("SELECT count(*) FROM v_disclosure_queue").fetchone()[0] == 1)
+        # affects is keyed per (build, component), so anything aggregating over that join
+        # counts one finding once per affected build/component pair -- inflating the yield
+        # numbers in the flattering direction. Fan the fixture out temporarily to prove it
+        # does not: a second affected component on the SAME build, plus a second affected
+        # build, must still be one finding.
+        con.execute("INSERT INTO component(build_id, name, path, kind) SELECT id, 'authd2',"
+                    "'/usr/sbin/authd2', 'userworld' FROM build WHERE build='1000'")
+        con.execute("INSERT INTO finding_affects(finding_id, build_id, component_id, state,"
+                    " confirmed_how) SELECT f.id, b.id, c.id, 'affected', 'static'"
+                    " FROM finding f, build b, component c"
+                    " WHERE b.build='1000' AND c.name='authd2'")
+        con.execute("UPDATE finding_affects SET state='affected' WHERE build_id="
+                    "(SELECT id FROM build WHERE build='1001')")
+        my = con.execute("SELECT findings, demonstrated, confirmed, high_or_crit "
+                         "FROM v_method_yield").fetchall()
+        uassert("fdb: v_method_yield counts a finding once per target, not per affects row",
+                all(r[0] == 1 and max(r[1:]) <= 1 for r in my), str(my))
+        uassert("fdb: v_findings.affected_builds counts builds, not (build, component)",
+                con.execute("SELECT affected_builds FROM v_findings").fetchone()[0] == 2)
+        con.rollback()   # and release the lock before the subprocesses below
 
         # 10. query guards writes by default
         expect("fdb: query runs SELECT", [PY, fdb, "--db", db, "query",

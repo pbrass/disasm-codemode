@@ -3,6 +3,24 @@
 All notable changes to disasm-codemode. Versioning is semantic (MAJOR.MINOR.PATCH); pre-1.0,
 minor versions may add features and refine interfaces.
 
+## 0.14.2 — 2026-07-29
+
+### `findings-db`: the yield view was counting the same finding several times
+Loading a real finding set exposed an aggregation bug in `v_method_yield`, the view that answers
+"which discovery method paid off on which target" — the number most likely to end up in a report.
+`finding_affects` has one row per **(build, component)**, so aggregating `sum(status = ...)` over
+that join counted each finding once per affected build. One target showed `demonstrated = 10`
+against `findings = 9`: more demonstrated findings than findings, and wrong in the flattering
+direction. The view now collapses to one row per (finding, target) before aggregating.
+`v_findings.affected_builds` had the same shape of error and now counts `DISTINCT build_id`, so a
+finding present in two components of one build is one affected build.
+
+### Fixed
+- `load` now validates spec keys against the table's real columns and exits naming the table, the
+  unknown key(s) and what is available. A hand-edited spec with an invented field
+  (`{"builds": [{..., "channel": "ga"}]}`) previously surfaced as a raw
+  `sqlite3.OperationalError` traceback from inside the INSERT.
+
 ## 0.14.1 — 2026-07-29
 
 ### `findings-db` schema rev 2 — verdict-vocabulary normalization

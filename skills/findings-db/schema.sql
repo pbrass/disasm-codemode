@@ -203,6 +203,39 @@ CREATE TABLE IF NOT EXISTS ledger_bug(
   disposition TEXT,                      -- why an unpromoted row is not a finding
   UNIQUE(ledger_id, src_rowid));
 
+-- One row per (CVE, bundled component) an SBOM KB says is present on a build.
+-- The point is the same as ledger_bug: an inventory row is NOT a finding, but a
+-- reachable one that never became a finding is a gap, so it needs either a
+-- finding_id or a written disposition. Keeps the producer's own vocabulary --
+-- SBOM tools disagree about severity words and reachability labels, and
+-- rewriting them here would lose the ability to diff against the source KB.
+CREATE TABLE IF NOT EXISTS sbom_cve(
+  id INTEGER PRIMARY KEY,
+  ledger_id INTEGER NOT NULL REFERENCES ledger(id) ON DELETE CASCADE,
+  build_id INTEGER REFERENCES build(id),
+  component_id INTEGER REFERENCES component(id),   -- when the bundled lib is a scoped component
+  cve_id TEXT NOT NULL,
+  component_name TEXT NOT NULL,          -- as the KB named it (package / soname / binary path)
+  component_type TEXT,
+  version TEXT,                          -- the version actually shipped, when the KB resolved it
+  severity TEXT,
+  cvss TEXT,
+  fixed_version TEXT,
+  present_on_fleet INTEGER,              -- shipped version is in the affected range
+  present_on_successor INTEGER,          -- still vulnerable on the successor build
+  fixed_in_patch INTEGER,                -- the successor bump addresses it => live n-day on fleet
+  reachable TEXT,                        -- preauth-remote / postauth / local / not-reachable / ...
+  exploitability TEXT,                   -- demonstrated / likely / theoretical / dos-only / none
+  adjudication TEXT,                     -- the KB's own conclusion, verbatim
+  gate TEXT,                             -- the reachability condition ("only if X")
+  triage_status TEXT,                    -- the KB's work-tracking state
+  summary TEXT,
+  url TEXT,
+  finding_id INTEGER REFERENCES finding(id),
+  disposition TEXT,                      -- why a reachable CVE is not a finding
+  src_rowid INTEGER,
+  UNIQUE(ledger_id, cve_id, component_name));
+
 CREATE INDEX IF NOT EXISTS ix_alias_finding    ON finding_alias(finding_id);
 CREATE INDEX IF NOT EXISTS ix_affects_build    ON finding_affects(build_id);
 CREATE INDEX IF NOT EXISTS ix_evidence_finding ON evidence(finding_id);
@@ -210,6 +243,8 @@ CREATE INDEX IF NOT EXISTS ix_ledgerbug_ledger ON ledger_bug(ledger_id);
 CREATE INDEX IF NOT EXISTS ix_ledgerbug_find   ON ledger_bug(finding_id);
 CREATE INDEX IF NOT EXISTS ix_build_target     ON build(target_id);
 CREATE INDEX IF NOT EXISTS ix_component_build  ON component(build_id);
+CREATE INDEX IF NOT EXISTS ix_sbomcve_ledger   ON sbom_cve(ledger_id);
+CREATE INDEX IF NOT EXISTS ix_sbomcve_find     ON sbom_cve(finding_id);
 
 -- ------------------------------------------------------------------------ views
 
@@ -304,6 +339,42 @@ SELECT l.path AS ledger, lb.id, lb.func_name, lb.bug_class, lb.verdict, lb.verdi
    AND lb.disposition IS NULL
    AND (lb.verdict IN ('violable', 'demonstrated', 'gated', 'latent')
         OR lb.status IN ('confirmed-violable', 'confirmed', 'demonstrated'));
+
+-- The SBOM half of the orphan sweep: a CVE the KB says is present on the fleet
+-- build AND reachable (or already exploited) that no finding covers and nobody
+-- wrote off. Same discipline as v_orphans -- an inventory row is allowed to be
+-- boring, but not silently dropped.
+DROP VIEW IF EXISTS v_sbom_orphans;
+CREATE VIEW v_sbom_orphans AS
+SELECT s.id, l.path AS ledger, s.cve_id, s.component_name, s.version, s.severity,
+       s.reachable, s.exploitability, s.fixed_in_patch, s.gate, s.adjudication, s.summary
+  FROM sbom_cve s
+  JOIN ledger l ON l.id = s.ledger_id
+ WHERE s.finding_id IS NULL
+   AND s.disposition IS NULL
+   AND s.present_on_fleet = 1
+   AND (s.reachable LIKE 'pre%'
+        OR s.exploitability IN ('demonstrated', 'likely'))
+ ORDER BY (s.exploitability = 'demonstrated') DESC, s.severity, s.cve_id;
+
+-- How far the SBOM triage actually got. `unassessed` is the honest number: a CVE
+-- with no reachability call is not a refutation, it is work not done, and it is
+-- invisible in any view that only lists conclusions.
+DROP VIEW IF EXISTS v_sbom_coverage;
+CREATE VIEW v_sbom_coverage AS
+SELECT l.path AS ledger, t.slug AS target, b.build,
+       count(*)                                              AS cves,
+       sum(s.present_on_fleet = 1)                           AS on_fleet,
+       sum(s.reachable IS NULL)                              AS unassessed,
+       sum(s.reachable LIKE 'pre%')                          AS preauth,
+       sum(s.exploitability = 'demonstrated')                AS demonstrated,
+       sum(s.finding_id IS NOT NULL)                         AS promoted,
+       sum(s.disposition IS NOT NULL)                        AS disposed
+  FROM sbom_cve s
+  JOIN ledger l ON l.id = s.ledger_id
+  LEFT JOIN build  b ON b.id = s.build_id
+  LEFT JOIN target t ON t.id = b.target_id
+ GROUP BY l.id;
 
 DROP VIEW IF EXISTS v_alias;
 CREATE VIEW v_alias AS

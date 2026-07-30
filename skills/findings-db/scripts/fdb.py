@@ -9,7 +9,7 @@ links back to the producer ledgers (audit DBs, SBOM KBs) they were promoted from
   fdb resolve P4-4                          legacy signifier -> canonical finding
   fdb register-ledger --path ... --kind ... register a producer DB
   fdb import-audit <kreview.db>             promote bug/audit rows as ledger_bug pointers
-  fdb import-sbom  <sbom.db>                link an SBOM KB's hosts/binaries
+  fdb import-sbom  <sbom.db>                link an SBOM KB + copy its CVE inventory
   fdb stats                                 row counts + the funnel
   fdb query "SELECT ..."                    raw SQL (read-only unless --write)
 
@@ -20,8 +20,8 @@ import argparse, json, os, sqlite3, sys, hashlib, datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCHEMA = os.path.join(os.path.dirname(HERE), "schema.sql")
-SCHEMA_REV = 2
-VERSION = "0.2.1"
+SCHEMA_REV = 3
+VERSION = "0.3.0"
 
 
 def now():
@@ -151,7 +151,9 @@ def cmd_load(args):
     con = connect(args)
     with open(args.spec) as fh:
         spec = json.load(fh)
-    unknown = [k for k in spec if k not in SECTIONS]
+    # a hand-written spec wants somewhere to say why it exists; JSON has no
+    # comments, so an underscore-prefixed key is one, and is ignored here
+    unknown = [k for k in spec if k not in SECTIONS and not k.startswith("_")]
     if unknown:
         sys.exit(f"[fdb] unknown section(s) in spec: {unknown}\n       known: {SECTIONS}")
     tally = {}
@@ -422,8 +424,104 @@ def cmd_import_audit(args):
     return 0
 
 
+# An SBOM KB's CVE table is the one part worth copying: it is the surface the
+# orphan sweep runs over. Column names differ between KBs, so map by presence.
+# Left = our column, right = the candidate source columns in preference order.
+SBOM_CVE_COLS = {
+    "cve_id":               ("cve_id", "cve", "id"),
+    "component_name":       ("component", "package", "library", "name"),
+    "component_type":       ("component_type", "type"),
+    "severity":             ("severity",),
+    "cvss":                 ("cvss", "cvss_score", "score"),
+    "fixed_version":        ("fixed_version", "fixed_in", "patched_version"),
+    "present_on_fleet":     ("present_on_fleet", "present", "affected"),
+    "present_on_successor": ("present_on_successor",),
+    "fixed_in_patch":       ("fixed_in_patch",),
+    "triage_status":        ("triage_status", "work_status"),
+    "summary":              ("summary", "description"),
+    "url":                  ("url", "link"),
+}
+# The adjudication lives in a separate table in every KB that has one, because a
+# CVE gets re-assessed as reachability work proceeds.
+SBOM_ANALYSIS_COLS = {
+    "reachable":      ("reachable", "reachability"),
+    "exploitability": ("exploitability",),
+    "adjudication":   ("verdict", "conclusion"),
+    "gate":           ("reachability_condition", "condition", "gate"),
+}
+
+
+def _pick(cols, candidates):
+    return next((c for c in candidates if c in cols), None)
+
+
+def _import_sbom_cves(con, src, tabs, lid, build_id):
+    """Copy the KB's CVE inventory (joined to its analysis rows) into sbom_cve."""
+    ccols = {r[1] for r in src.execute("PRAGMA table_info(cve)")}
+    cmap = {k: _pick(ccols, v) for k, v in SBOM_CVE_COLS.items()}
+    for req in ("cve_id", "component_name"):
+        if not cmap[req]:
+            sys.exit(f"[fdb] the KB's cve table has no {req} column "
+                     f"(saw: {', '.join(sorted(ccols))})")
+
+    # analysis keyed by (component, cve_id); a component-wide verdict has an empty
+    # cve_id and applies to every CVE of that component that has no row of its own.
+    per_cve, per_comp = {}, {}
+    if "analysis" in tabs:
+        acols = {r[1] for r in src.execute("PRAGMA table_info(analysis)")}
+        amap = {k: _pick(acols, v) for k, v in SBOM_ANALYSIS_COLS.items()}
+        akey = _pick(acols, ("component", "package", "library"))
+        for a in src.execute("SELECT * FROM analysis"):
+            vals = {k: (a[c] if c else None) for k, c in amap.items()}
+            if "status" in acols:
+                vals["triage_status"] = a["status"]
+            cid = a["cve_id"] if "cve_id" in acols else None
+            comp = a[akey] if akey else None
+            (per_cve.setdefault((comp, cid), vals) if cid
+             else per_comp.setdefault(comp, vals))
+
+    # A finding claims a KB row by carrying its key as an alias. Normally that key
+    # is the CVE id (namespace 'cve'), but a KB also tracks leads it opened itself
+    # under a local id ('P4-1', 'PATCHDIFF:openssl'), and those are aliases too --
+    # so match any namespace, preferring 'cve' when both exist.
+    #
+    # The same CVE usually appears against several carriers (three copies of xmlsec
+    # at different versions, in services on different planes). Claiming the CVE
+    # therefore does NOT mean claiming every carrier: a finding about the pre-auth
+    # copy must not mark the post-auth copy as covered, or the sweep stops seeing
+    # it. So an alias may be CARRIER-QUALIFIED as "<key> :: <component>", which
+    # matches only that row; a bare key still matches every carrier, for the common
+    # case where the finding really is about the library wherever it appears.
+    by_cve = {}
+    for r in con.execute("SELECT alias, namespace, finding_id FROM finding_alias "
+                         "ORDER BY (namespace = 'cve')"):
+        by_cve[r["alias"].upper()] = r["finding_id"]
+
+    ins = upd = linked = 0
+    for c in src.execute("SELECT rowid AS rid, * FROM cve"):
+        row = {k: (c[col] if col else None) for k, col in cmap.items()}
+        comp = row["component_name"]
+        row.update(per_comp.get(comp) or {})
+        row.update(per_cve.get((comp, row["cve_id"])) or {})
+        row["ledger_id"], row["src_rowid"] = lid, c["rid"]
+        row["build_id"] = build_id
+        if build_id is not None:
+            m = con.execute("SELECT id FROM component WHERE build_id = ? AND "
+                            "(path = ? OR name = ?)", (build_id, comp, comp)).fetchone()
+            row["component_id"] = m["id"] if m else None
+        key = (row["cve_id"] or "").upper()
+        fid = by_cve.get(f"{key} :: {(comp or '').upper()}") or by_cve.get(key)
+        if fid:
+            row["finding_id"] = fid
+            linked += 1
+        _, verb = _upsert(con, "sbom_cve", ["ledger_id", "cve_id", "component_name"], row)
+        ins += verb == "inserted"
+        upd += verb == "updated"
+    return ins, upd, linked
+
+
 def cmd_import_sbom(args):
-    """Register an SBOM KB and map its hosts to builds (link only; no row copy)."""
+    """Register an SBOM KB, map its hosts to builds, and copy its CVE inventory."""
     con = connect(args)
     src_path = os.path.abspath(args.path)
     src = sqlite3.connect(f"file:{src_path}?mode=ro", uri=True)
@@ -439,8 +537,20 @@ def cmd_import_sbom(args):
     if args.build:
         row["build_id"] = _build_id(con, args.target, args.build)
     lid, verb = _upsert(con, "ledger", ["path"], row)
-    con.commit()
     print(f"[fdb] sbom ledger {verb}: id={lid}\n      counts {counts}")
+
+    if "cve" in tabs:
+        ins, upd, linked = _import_sbom_cves(con, src, tabs, lid, row.get("build_id"))
+        print(f"      sbom_cve: {ins} inserted, {upd} updated, "
+              f"{linked} linked to a finding by CVE alias")
+        orph = con.execute("SELECT count(*) c FROM v_sbom_orphans WHERE ledger = ?",
+                           (src_path,)).fetchone()["c"]
+        if orph:
+            # same loudness as the audit funnel: a reachable CVE with no finding
+            # and no disposition is exactly what this store exists to catch
+            print(f"      ** {orph} reachable CVE(s) with no finding and no "
+                  f"disposition -- see v_sbom_orphans")
+    con.commit()
 
     # An SBOM KB records the hosts it was collected from, and those carry build
     # numbers -- so it can say whether the scope this DB knows about matches the
@@ -471,6 +581,12 @@ def cmd_resolve(args):
         "SELECT alias, namespace, canonical_id, slug, title, status FROM v_alias "
         "WHERE alias = ? COLLATE NOCASE", (args.alias,)).fetchall()
     if not rows:
+        # a carrier-qualified alias ("CVE-… :: java:xmlsec@1.5.5") should still be
+        # findable by the bare key a human types
+        rows = con.execute(
+            "SELECT alias, namespace, canonical_id, slug, title, status FROM v_alias "
+            "WHERE alias LIKE ? || ' ::%' COLLATE NOCASE", (args.alias,)).fetchall()
+    if not rows:
         r = con.execute("SELECT canonical_id, slug, title, status FROM finding "
                         "WHERE canonical_id = ? COLLATE NOCASE OR slug = ? COLLATE NOCASE",
                         (args.alias, args.alias)).fetchone()
@@ -489,7 +605,8 @@ def cmd_stats(args):
     con = connect(args)
     print(f"db: {db_path(args)}")
     for t in ("engagement", "target", "build", "component", "finding", "finding_alias",
-              "finding_affects", "evidence", "disclosure", "ledger", "ledger_bug"):
+              "finding_affects", "evidence", "disclosure", "ledger", "ledger_bug",
+              "sbom_cve"):
         n = con.execute(f"SELECT count(*) c FROM {t}").fetchone()["c"]
         print(f"  {t:<16} {n}")
     rows = con.execute("SELECT * FROM v_method_yield ORDER BY target, discovery_method").fetchall()
@@ -499,10 +616,40 @@ def cmd_stats(args):
         for r in rows:
             print(f"  {r['target']:<14} {r['discovery_method']:<14} {r['findings']:>3} "
                   f"{r['demonstrated'] or 0:>5} {r['confirmed'] or 0:>5} {r['high_or_crit'] or 0:>8}")
-    orph = con.execute("SELECT count(*) c FROM v_orphans").fetchone()["c"]
-    if orph:
-        print(f"\n  ** {orph} adjudicated-real ledger bug(s) with no finding and no "
-              f"disposition -- see 'fdb query \"SELECT * FROM v_orphans\"'")
+    # An empty orphan view means "every inventoried row was concluded", NOT
+    # "every target was inventoried" -- so report the coverage that produced it,
+    # and name the targets with no SBOM inventory at all. Otherwise a clean
+    # sweep reads as a completeness it does not have.
+    cov = con.execute("SELECT * FROM v_sbom_coverage ORDER BY target, build").fetchall()
+    if cov:
+        print("\nsbom coverage:")
+        print(f"  {'target':<10} {'build':<12} {'cves':>5} {'fleet':>6} "
+              f"{'unassessed':>11} {'linked':>7} {'disposed':>9}")
+        for r in cov:
+            print(f"  {r['target']:<10} {str(r['build']):<12} {r['cves']:>5} "
+                  f"{r['on_fleet'] or 0:>6} {r['unassessed'] or 0:>11} "
+                  f"{r['promoted'] or 0:>7} {r['disposed'] or 0:>9}")
+        n_un = sum(r["unassessed"] or 0 for r in cov)
+        if n_un:
+            print(f"  ({n_un} CVE(s) carry no reachability call at all -- not a "
+                  f"refutation, and invisible to the orphan view)")
+    gaps = [r["slug"] for r in con.execute(
+        "SELECT DISTINCT t.slug FROM target t "
+        "  JOIN build b ON b.target_id = t.id "
+        "  JOIN finding_affects fa ON fa.build_id = b.id "
+        " WHERE t.id NOT IN (SELECT b2.target_id FROM sbom_cve s "
+        "                      JOIN build b2 ON b2.id = s.build_id) "
+        " ORDER BY t.slug")]
+    if gaps:
+        print(f"\n  ** no SBOM inventory loaded for: {', '.join(gaps)} -- "
+              f"bundled-component CVEs on those targets cannot be swept")
+
+    for view, what in (("v_orphans", "adjudicated-real ledger bug(s)"),
+                       ("v_sbom_orphans", "reachable SBOM CVE(s)")):
+        n = con.execute(f"SELECT count(*) c FROM {view}").fetchone()["c"]
+        if n:
+            print(f"\n  ** {n} {what} with no finding and no disposition -- see "
+                  f"'fdb query \"SELECT * FROM {view}\"'")
     return 0
 
 

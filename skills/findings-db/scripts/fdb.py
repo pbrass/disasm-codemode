@@ -272,17 +272,61 @@ def cmd_load(args):
 
 # --------------------------------------------------------------- ledger imports
 
+def _ledger_scope(path):
+    """Read a binary-audit ledger's self-described scope, or None.
+
+    Ledgers written by binary-audit >= v0.8.0 carry an `audit_scope` row saying
+    which target/build/component they audited. Older ones do not -- for those the
+    directory path was the only record, which is why --target/--build exist.
+    """
+    con = sqlite3.connect(path)
+    con.row_factory = sqlite3.Row
+    try:
+        r = con.execute("SELECT * FROM audit_scope WHERE id = 1").fetchone()
+    except sqlite3.OperationalError:
+        return None
+    finally:
+        con.close()
+    return dict(r) if r else None
+
+
 def cmd_register_ledger(args):
     con = connect(args)
-    row = {"path": os.path.abspath(args.path), "kind": args.kind, "notes": args.notes,
+    path = os.path.abspath(args.path)
+    row = {"path": path, "kind": args.kind, "notes": args.notes,
            "last_synced": now()}
-    if args.target:
-        row["target_id"] = _lookup(con, "target", "slug", args.target, "target")
-    if args.build:
-        row["build_id"] = _build_id(con, args.target, args.build)
+    # An explicit flag always wins: a ledger can be re-scoped without rewriting
+    # it, and the 8 pre-scope ledgers have no other way to say what they are.
+    scope = _ledger_scope(path) or {}
+    target = args.target or scope.get("target")
+    build = args.build or scope.get("build")
+    component = args.component or scope.get("component")
+    inferred = [k for k, v in (("target", args.target), ("build", args.build),
+                               ("component", args.component))
+                if not v and scope.get(k)]
+    if target:
+        row["target_id"] = _lookup(con, "target", "slug", target, "target")
+    if build:
+        if not target:
+            sys.exit("[fdb] a build needs a target to resolve against -- pass "
+                     "--target, or re-extract so the ledger records its own scope")
+        row["build_id"] = _build_id(con, target, build)
+        if component:
+            row["component_id"] = _component_id(con, row["build_id"], component)
     lid, verb = _upsert(con, "ledger", ["path"], row)
     con.commit()
-    print(f"[fdb] ledger {verb}: id={lid} {row['path']}")
+    print(f"[fdb] ledger {verb}: id={lid} {path}")
+    if inferred:
+        print(f"      scope read from the ledger itself: "
+              f"{', '.join(f'{k}={scope[k]}' for k in inferred)}")
+    # Ask the stored row, not the arguments: _upsert leaves a column alone when the
+    # new value is None, so a re-registration with no flags keeps whatever scope an
+    # earlier one set. Warning off the arguments would call that ledger unscoped.
+    stored = con.execute("SELECT target_id, build_id, component_id FROM ledger "
+                         "WHERE id = ?", (lid,)).fetchone()
+    if not any(stored):
+        print("      no scope: the ledger records none and none was passed -- "
+              "its bugs will promote unscoped")
     return 0
 
 
@@ -694,7 +738,8 @@ def main(argv=None):
     p = sub.add_parser("register-ledger", help="register a producer DB")
     p.add_argument("--path", required=True)
     p.add_argument("--kind", required=True, choices=["audit", "sbom", "graph-only"])
-    p.add_argument("--target"); p.add_argument("--build"); p.add_argument("--notes")
+    p.add_argument("--target"); p.add_argument("--build")
+    p.add_argument("--component"); p.add_argument("--notes")
     p.set_defaults(fn=cmd_register_ledger)
 
     p = sub.add_parser("import-audit", help="promote an audit ledger's bugs as pointers")

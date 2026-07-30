@@ -3,6 +3,32 @@
 All notable changes to disasm-codemode. Versioning is semantic (MAJOR.MINOR.PATCH); pre-1.0,
 minor versions may add features and refine interfaces.
 
+## 0.15.0 — 2026-07-30
+
+### A ledger now says what it audited
+`kreview.db` recorded a great deal about *how* an audit went and nothing at all about **what was
+audited**. The directory path was the only evidence — a ledger at `audit/vmci/kreview.db` meant "the
+vmci module of some particular build" purely by convention, so promoting its bugs into a findings DB
+meant a human restating target/build/component by hand, once per ledger, from memory of the directory
+layout. That is exactly the kind of provenance that is correct on the day it is written and wrong six
+months later.
+
+Both extractors now write an `audit_scope` row into the ledger: target, build, component, the binary's
+absolute path and sha256, the profile it was scored with, which extractor wrote it, and when. Pass
+`--target/--build/--component` (or set `KAUDIT_TARGET`/`KAUDIT_BUILD`/`KAUDIT_COMPONENT`); the flag
+wins over the env var. `extract.py` keeps its positional `<binary> <db> [profile]` interface — the new
+flags are pulled out before the positionals are read, so existing invocations are unaffected.
+`extract_bn.py` gains `--binary` for the path behind an already-open Binary Ninja view. Neither is
+required: an unscoped run still produces a valid ledger and prints a line saying what it could not
+record.
+
+`fdb register-ledger` reads that row when `--target/--build` are not passed, and prints the scope it
+inferred. An explicit flag still overrides — a ledger can be re-pointed at the next build of the same
+binary without re-extracting it. A ledger with no `audit_scope` table (every one written before this
+release) registers exactly as before, and is told once that its bugs will promote unscoped. That
+warning reads the stored row rather than the arguments, so re-registering an already-scoped ledger
+with no flags does not disown the scope it already has.
+
 ## 0.14.2 — 2026-07-29
 
 ### `findings-db`: the yield view was counting the same finding several times

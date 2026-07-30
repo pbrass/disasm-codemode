@@ -61,7 +61,10 @@ Key ideas:
 fdb init                                        # create/upgrade the schema (idempotent)
 fdb load spec.json                              # idempotent bulk upsert -- the backfill path
 fdb resolve P4-4                                # legacy signifier -> canonical finding
-fdb register-ledger --path K --kind audit --target T --build B
+fdb register-ledger --path K --kind audit [--target T --build B --component C]
+                                                # scope flags optional: a ledger written by
+                                                # binary-audit >= 0.15.0 records its own, and any
+                                                # flag passed overrides what it recorded
 fdb import-audit  kreview.db                    # promote bug/audit rows as ledger_bug pointers
 fdb import-sbom   sbom.db                       # register an SBOM KB + its host/binary counts
 fdb stats                                       # row counts, yield by target x method, orphans
@@ -104,10 +107,15 @@ Caveat: a `null` in a spec means "leave alone", not "clear this field" — clear
 
 ## Promoting from a producer ledger
 ```bash
-fdb register-ledger --path audit/kreview.db --kind audit --target appliance-a --build 1234567
+fdb register-ledger --path audit/kreview.db --kind audit   # scope read from the ledger itself
 fdb import-audit audit/kreview.db          # -> ledger_bug rows + a row_counts snapshot
 fdb query "SELECT * FROM v_orphans"        # adjudicated-real, never promoted, no disposition
 ```
+A ledger written by `binary-audit` >= 0.15.0 carries an `audit_scope` row naming the
+target/build/component it audited, so registration needs no flags; `register-ledger` prints what it
+read. Older ledgers recorded nothing but their directory path — pass `--target/--build/--component`
+for those, or it says so and their bugs promote unscoped.
+
 `import-audit` tolerates producer schema drift (it reads `PRAGMA table_info(bug)` and takes what
 is there) and picks the **strongest** adjudication per function — a function reviewed twice must
 not be filed under whichever verdict landed last.

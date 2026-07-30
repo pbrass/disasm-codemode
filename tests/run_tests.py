@@ -1588,6 +1588,64 @@ def test_findings_db():
         expect("fdb: the upgraded DB is then stable",
                [PY, fdb, "--db", old, "init"], rc=0, nothas=[r"upgraded rev"])
         oc.close()
+
+        # 13. a ledger that describes its own scope needs no --target/--build.
+        #     Before audit_scope the directory path was the only record of WHAT a
+        #     kreview.db audited, so every promotion needed a human to restate it.
+        scoped = os.path.join(td, "scoped.db")
+        sc = sqlite3.connect(scoped)
+        sc.executescript(
+            "CREATE TABLE func(addr INTEGER PRIMARY KEY, name TEXT);"
+            "CREATE TABLE bug(func_name TEXT, desc TEXT, confidence TEXT, status TEXT);"
+            "CREATE TABLE audit_scope(id INTEGER PRIMARY KEY CHECK(id = 1),"
+            " target TEXT, build TEXT, component TEXT, binary_path TEXT,"
+            " binary_sha256 TEXT, profile TEXT, extractor TEXT, extracted_at TEXT);"
+            "INSERT INTO audit_scope VALUES(1,'appliance-t','1000','authd',"
+            " '/usr/sbin/authd','deadbeef','p.json','extract.py','2026-01-01T00:00:00Z');")
+        sc.commit(); sc.close()
+        expect("fdb: register-ledger reads the ledger's own scope",
+               [PY, fdb, "--db", db, "register-ledger", "--path", scoped,
+                "--kind", "audit"], rc=0,
+               has=[r"ledger inserted", r"scope read from the ledger itself",
+                    r"target=appliance-t", r"build=1000", r"component=authd"])
+        con = sqlite3.connect(db)
+        srow = con.execute(
+            "SELECT t.slug, b.build, c.name FROM ledger l"
+            " JOIN target t ON t.id = l.target_id JOIN build b ON b.id = l.build_id"
+            " JOIN component c ON c.id = l.component_id WHERE l.path = ?",
+            (os.path.abspath(scoped),)).fetchone()
+        uassert("fdb: the inferred scope resolves to real FK rows",
+                srow and tuple(srow) == ("appliance-t", "1000", "authd"),
+                str(srow and tuple(srow)))
+        # an explicit flag still wins -- a ledger can be re-scoped without rewriting it.
+        # The same component exists in the later build, which is the case that matters:
+        # re-pointing an audit at the next build of the same binary.
+        con.execute("INSERT INTO component(build_id, name, path, kind) SELECT id, 'authd',"
+                    "'/usr/sbin/authd', 'userworld' FROM build WHERE build='1001'")
+        con.commit()
+        expect("fdb: an explicit --build overrides the recorded scope",
+               [PY, fdb, "--db", db, "register-ledger", "--path", scoped,
+                "--kind", "audit", "--target", "appliance-t", "--build", "1001"],
+               rc=0, nothas=[r"build=1000"])
+        uassert("fdb: the override rewrote the ledger's build",
+                con.execute("SELECT b.build FROM ledger l JOIN build b ON b.id = l.build_id"
+                            " WHERE l.path = ?", (os.path.abspath(scoped),)
+                            ).fetchone()[0] == "1001")
+        # and a pre-scope ledger still registers -- it just says what it cannot say
+        legacy = os.path.join(td, "legacy.db")
+        lg = sqlite3.connect(legacy)
+        lg.execute("CREATE TABLE bug(func_name TEXT, desc TEXT, confidence TEXT, status TEXT)")
+        lg.commit(); lg.close()
+        expect("fdb: a legacy ledger with no audit_scope still registers, loudly",
+               [PY, fdb, "--db", db, "register-ledger", "--path", legacy,
+                "--kind", "audit"], rc=0,
+               has=[r"ledger inserted", r"its bugs will promote unscoped"])
+        # re-registering an already-scoped ledger with no flags must not call it
+        # unscoped -- the upsert keeps the scope, so the warning would be a lie
+        expect("fdb: a re-register with no flags keeps (and does not disown) the scope",
+               [PY, fdb, "--db", db, "register-ledger", "--path", led,
+                "--kind", "audit"], rc=0, nothas=[r"promote unscoped"])
+        con.close()
     except Exception as e:
         bad("findings-db suite", repr(e))
     finally:

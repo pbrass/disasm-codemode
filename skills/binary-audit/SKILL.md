@@ -41,8 +41,13 @@ The scripts are path-agnostic via env vars — set them once:
 - `KAUDIT_BIN`     — the **target ELF** to audit (symbol-rich). Required.
 - `KAUDIT_ROOT`    — working dir for the ledger (`$KAUDIT_ROOT/kreview.db`) + extracted `hlil/`,`asm/` (default `.`).
 - `KAUDIT_BVMATCH` — (optional) the open Binary Ninja BV name for `bn-decompile` HLIL (default = basename of `KAUDIT_BIN`).
+- `KAUDIT_TARGET` / `KAUDIT_BUILD` / `KAUDIT_COMPONENT` — (optional, but set them) **what this ledger
+  audits**: product-line slug, vendor build number, and binary/module name. Both extractors record these
+  in the ledger's `audit_scope` table, so `fdb register-ledger` can read the scope instead of a human
+  restating it from the directory path. Equivalent flags: `--target/--build/--component`.
 ```bash
 export KAUDIT_BIN=./target.elf KAUDIT_ROOT=./kaudit
+export KAUDIT_TARGET=appliance-a KAUDIT_BUILD=1234567 KAUDIT_COMPONENT=authd
 mkdir -p "$KAUDIT_ROOT"/hlil "$KAUDIT_ROOT"/asm
 cp profiles/generic-c.json myprofile.json   # then EDIT seed_regex -> your attacker-input entry fns
 python3 scripts/extract.py "$KAUDIT_BIN" "$KAUDIT_ROOT/kreview.db" myprofile.json   # metrics + call graph
@@ -96,8 +101,9 @@ whether the handler's parsed fields are clamped before the shared command buffer
 
 ## Pipeline & interface
 ```
-scripts/extract.py  <binary> <db> [profile.json]   # ~25s: capstone metrics + resolved call graph -> sqlite
-scripts/extract_bn.py --bv-match <tab> --db <db> --profile <profile.json>
+scripts/extract.py  <binary> <db> [profile.json] [--target T --build B --component C]
+                                                    # ~25s: capstone metrics + resolved call graph -> sqlite
+scripts/extract_bn.py --bv-match <tab> --db <db> --profile <profile.json> [--binary PATH --target T --build B --component C]
 scripts/score.py    <db>        [profile.json]      # reachability gate + BugScore; writes back; prints top-40 + anchors
 scripts/graph_report.py --db <db> --out graph-locality.json --md graph-locality.md
                                                         # address/callgraph locality report for stripped/recovered targets

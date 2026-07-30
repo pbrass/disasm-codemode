@@ -16,6 +16,9 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "bn-inspect", "scripts"))
 import bncm
 
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import audit_scope
+
 
 SCHEMA = """
 DROP TABLE IF EXISTS func;
@@ -206,6 +209,9 @@ def main():
     bncm.add_target_args(ap)
     ap.add_argument("--db", required=True, help="kreview.db path to rebuild")
     ap.add_argument("--profile", help="profile JSON with sink_regex/state_regex")
+    ap.add_argument("--binary", help="path to the binary the open view was built "
+                                     "from, recorded for provenance + sha256")
+    audit_scope.add_args(ap)
     args = ap.parse_args()
 
     prof = {}
@@ -216,6 +222,12 @@ def main():
     db = os.path.abspath(args.db)
     os.makedirs(os.path.dirname(db), exist_ok=True)
     bncm.run(BODY, _db=db, _schema=SCHEMA, _sink_regex=sink, _state_regex=state, **bncm.target_params(args))
+    # written locally, not in BODY: the code-mode sandbox AST-denies `open`/`os`,
+    # so hashing the binary has to happen on this side of the MCP call anyway.
+    print(audit_scope.report(audit_scope.write(
+        db, extractor="extract_bn.py (Binary Ninja view)",
+        binary_path=args.binary, profile=args.profile,
+        **audit_scope.from_args(args))))
 
 
 if __name__ == "__main__":

@@ -12,9 +12,25 @@ import os
 from collections import defaultdict
 import capstone
 
-BIN = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("KAUDIT_BIN","target.elf")
-DB  = sys.argv[2] if len(sys.argv) > 2 else os.environ.get("KAUDIT_ROOT",".")+"/kreview.db"
-PROFILE = sys.argv[3] if len(sys.argv) > 3 else None
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import audit_scope
+
+# Positional args are the long-standing interface (<binary> <db> [profile]); the
+# scope flags are keyword-only so they can be added anywhere without disturbing
+# it. Pull them out before the positionals are read.
+_argv = sys.argv[1:]
+_scope = {}
+for _k in ("target", "build", "component"):
+    if f"--{_k}" in _argv:
+        _i = _argv.index(f"--{_k}")
+        _scope[_k] = _argv[_i + 1] if _i + 1 < len(_argv) else None
+        del _argv[_i:_i + 2]
+    else:
+        _scope[_k] = os.environ.get(audit_scope.ENV[_k]) or None
+
+BIN = _argv[0] if len(_argv) > 0 else os.environ.get("KAUDIT_BIN","target.elf")
+DB  = _argv[1] if len(_argv) > 1 else os.environ.get("KAUDIT_ROOT",".")+"/kreview.db"
+PROFILE = _argv[2] if len(_argv) > 2 else None
 
 # defaults = ESXi vmkernel; override with a profile JSON (sink_regex / state_regex). See profiles/.
 _DEF_SINK  = r'(_?vmk_)?(Memcpy|Memmove|memcpy|memmove|memset|bcopy|strcpy|strncpy|strcat|strlcpy|sprintf|CopyIn|CopyOut|CopyFromMachine|Heap_?Alloc|Mem_?Alloc|Pkt_?Alloc|World_?Alloc|MemAlloc)'
@@ -146,6 +162,11 @@ def main():
     con.commit()
     print(f"functions={len(rows)} edges={cur.execute('SELECT COUNT(*) FROM edge').fetchone()[0]}")
     con.close()
+    # record WHAT was audited, so promoting these bugs later needs no human to
+    # supply target/build/component from the directory path
+    print(audit_scope.report(audit_scope.write(
+        DB, extractor="extract.py (ELF symbol table)",
+        binary_path=BIN, profile=PROFILE, **_scope)))
 
 if __name__ == "__main__":
     main()
